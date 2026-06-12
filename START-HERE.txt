@@ -1,0 +1,30 @@
+EXIM Elite Contact Exporter v1.7.2
+
+1. Open Terminal in this folder.
+2. Run: npm install
+3. Run: npm run agent:login
+4. Sign in to Gemini in the opened Chrome window.
+5. Wait until Terminal says "Gemini login confirmed" and Chrome closes itself.
+6. Only after the login command exits, run: npm run agent
+7. Leave that Terminal window running.
+8. Open chrome://extensions and enable Developer mode.
+9. Click Load unpacked and select this folder.
+10. Refresh the EXIM Elite report, apply filters, and click Capture All.
+
+Badge:
+AI = working
+IN = Gemini login needed
+OK = complete
+!  = failed
+
+The popup may close when you switch tabs. The local agent continues in the
+background; reopen the extension popup to see progress and export Excel.
+
+Mac and Windows use the same npm commands. The agent handles Command+V on
+macOS and Control+V on Windows/Linux internally.
+
+Every contact lookup uses the report's captured hover Google query URL first.
+The Google results screenshot is copied to the clipboard, pasted into Gemini,
+then sent with the strict JSON prompt. The plus/upload menu is not used.
+
+No Gemini API key is required. Do not put account passwords in this folder.

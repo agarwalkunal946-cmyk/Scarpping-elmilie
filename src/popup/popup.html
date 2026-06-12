@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>EXIM Elite Exporter</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">EX</div>
+          <div>
+            <h1>EXIM Exporter</h1>
+            <p id="pageStatus">Ready</p>
+          </div>
+        </div>
+        <button id="openOptions" class="icon-button" title="Settings" type="button" aria-label="Settings">
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+
+      <section class="controls" aria-label="Capture settings">
+        <label>
+          <span>Backup</span>
+          <input id="maxScrolls" type="number" min="5" max="500" step="5">
+        </label>
+        <label class="checkline">
+          <input id="dedupe" type="checkbox">
+          <span>Dedupe</span>
+        </label>
+        <label class="checkline">
+          <input id="startFromTop" type="checkbox">
+          <span>Top first</span>
+        </label>
+      </section>
+
+      <section class="actions" aria-label="Actions">
+        <button id="captureVisible" class="secondary-action" type="button">Check</button>
+        <button id="captureAll" class="primary-action" type="button">Capture All</button>
+        <button id="enrichContacts" class="secondary-action" type="button">Find Contacts</button>
+        <button id="exportCsv" class="export-action" type="button">CSV</button>
+        <button id="exportExcel" class="export-action" type="button">Excel</button>
+      </section>
+
+      <section class="metrics" aria-label="Summary">
+        <div>
+          <strong id="totalRows">0</strong>
+          <span>Rows</span>
+        </div>
+        <div>
+          <strong id="websiteRows">0</strong>
+          <span>Website</span>
+        </div>
+        <div>
+          <strong id="emailRows">0</strong>
+          <span>Email</span>
+        </div>
+        <div>
+          <strong id="phoneRows">0</strong>
+          <span>Phone</span>
+        </div>
+      </section>
+
+      <section class="preview" aria-label="Preview">
+        <table>
+          <thead>
+            <tr>
+              <th>HSN</th>
+              <th>Website Name</th>
+              <th>Website URL</th>
+              <th>Email</th>
+              <th>Phone</th>
+            </tr>
+          </thead>
+          <tbody id="previewRows">
+            <tr>
+              <td colspan="5" class="empty">No rows captured</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <footer>
+        <span id="duplicateInfo">Duplicates removed: 0</span>
+        <span id="activity">Idle</span>
+      </footer>
+
+      <div id="busyOverlay" class="busy-overlay" hidden>
+        <div class="busy-panel" role="status" aria-live="polite">
+          <div class="loader-ring" aria-hidden="true"></div>
+          <strong id="busyTitle">Working</strong>
+          <span id="busyDetail">You may switch tabs. Reopen the popup to see progress.</span>
+          <div class="loader-bar" aria-hidden="true"><span></span></div>
+        </div>
+      </div>
+    </main>
+
+    <script src="../lib/powerbi-dsr.js"></script>
+    <script src="../lib/processor.js"></script>
+    <script src="../lib/exporters.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

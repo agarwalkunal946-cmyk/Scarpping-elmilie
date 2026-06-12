@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "EXIM Elite Report Exporter",
+  "short_name": "EXIM Exporter",
+  "version": "1.7.2",
+  "description": "Extracts EXIM Elite Power BI report data and enriches contacts through a local Playwright Gemini agent.",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "downloads",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://eximelite.com/*",
+    "https://*.eximelite.com/*",
+    "https://app.powerbi.com/*",
+    "https://*.powerbi.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://eximelite.com/*",
+        "https://*.eximelite.com/*",
+        "https://app.powerbi.com/*",
+        "https://*.powerbi.com/*"
+      ],
+      "js": [
+        "src/content/powerbi-capture-main.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "icons": {
+    "16": "assets/icon16.png",
+    "32": "assets/icon32.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "action": {
+    "default_title": "EXIM Elite Exporter",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "32": "assets/icon32.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "options_page": "src/options/options.html"
+}

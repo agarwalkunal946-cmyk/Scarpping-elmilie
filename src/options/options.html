@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>EXIM Exporter Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>EXIM Exporter Settings</h1>
+        <p id="status">Ready</p>
+      </header>
+
+      <form id="settingsForm">
+        <label>
+          <span>Maximum scrolls</span>
+          <input id="maxScrolls" type="number" min="5" max="500" step="5">
+        </label>
+
+        <label>
+          <span>Scroll delay ms</span>
+          <input id="scrollDelayMs" type="number" min="100" max="2500" step="50">
+        </label>
+
+        <label class="checkline ai-toggle">
+          <input id="playwrightEnabled" type="checkbox">
+          <span>Use local Playwright Gemini agent</span>
+        </label>
+
+        <label>
+          <span>Agent URL</span>
+          <input id="agentBaseUrl" type="url" autocomplete="off" placeholder="http://127.0.0.1:4318">
+        </label>
+
+        <button id="openGeminiLogin" type="button">Open Gemini Login</button>
+
+        <p class="note">Run the local agent first. It uses a persistent Chrome profile, extracts Google organic links for each unique company, sends them to Gemini, and returns strict JSON.</p>
+
+        <label class="checkline">
+          <input id="dedupe" type="checkbox">
+          <span>Duplicate handling</span>
+        </label>
+
+        <label class="checkline">
+          <input id="startFromTop" type="checkbox">
+          <span>Start capture from top</span>
+        </label>
+
+        <label class="checkline">
+          <input id="restoreScroll" type="checkbox">
+          <span>Restore scroll position</span>
+        </label>
+
+        <div class="actions">
+          <button id="save" type="submit">Save</button>
+          <button id="reset" type="button">Reset</button>
+        </div>
+      </form>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>
