@@ -1,6 +1,6 @@
 {
   "name": "exim-elite-report-exporter",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "private": true,
   "description": "EXIM Elite contact exporter with a persistent local Playwright and Gemini web agent.",
   "scripts": {

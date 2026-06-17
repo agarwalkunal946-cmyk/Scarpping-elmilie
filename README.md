@@ -23,11 +23,12 @@ The CSV and Excel files contain exactly:
 7. Reopen the popup after the badge changes to `OK`, then export CSV or Excel.
 
 No Gemini API key is used. The agent automates the normal Gemini website in a persistent local Chrome profile.
+By default it processes up to 15 unique-company Gemini lookups in parallel. Set `GEMINI_PARALLELISM=1..15` before `npm run agent` to tune speed versus account/browser limits.
 
 ## Accuracy Rules
 
 - Power BI remains the source for HSN and Website Name (Consignee).
-- One click starts the whole job. For speed, each unique company gets its top Google organic result links extracted as text and sent in one Gemini JSON request; duplicate rows reuse the same result.
+- One click starts the whole job. For speed, unique companies are processed through multiple Gemini tabs in parallel. Each unique company gets its top Google organic result links extracted as text and sent in one Gemini JSON request; duplicate rows reuse the same result.
 - The agent uses the captured hover Google query URL from the report first, then extracts the top 10-15 non-sponsored Google organic links from the loaded page. It no longer needs to upload a Google screenshot to Gemini for the normal flow.
 - Google sponsored results, social sites, maps, redirects, and unrelated similarly named companies are rejected.
 - Gemini is instructed to use Rank 1 from the extracted non-sponsored organic result list, even when that result is a trade-data portal, directory, or profile page.

@@ -25,6 +25,10 @@ body {
   background: #eef4f8;
 }
 
+body.busy-lock {
+  overflow: hidden;
+}
+
 button,
 input,
 select {
@@ -316,7 +320,7 @@ footer {
 }
 
 .busy-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: 20;
   display: grid;

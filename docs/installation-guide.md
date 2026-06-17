@@ -34,6 +34,8 @@ For normal use, start the companion agent and leave it running:
 npm run agent
 ```
 
+The agent opens up to 15 Gemini tabs in parallel by default. To reduce load or increase speed, set `GEMINI_PARALLELISM` from `1` to `15` before starting the agent.
+
 The extension Settings page can open the Gemini login window only while the local agent is running.
 
 ## Manual Login

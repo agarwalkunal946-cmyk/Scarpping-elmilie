@@ -687,10 +687,10 @@ async function extractPageContactCandidates(page, result) {
   }));
 }
 
-async function collectContactCandidates(context, organicResults, onProgress = () => {}) {
+async function collectContactCandidates(context, organicResults, onProgress = () => {}, reusablePage = null) {
   const candidates = [];
   const seen = new Set();
-  const page = await context.newPage();
+  const page = reusablePage || await context.newPage();
   try {
     for (const result of organicResults.slice(0, 8)) {
       onProgress(result);
@@ -731,7 +731,9 @@ async function collectContactCandidates(context, organicResults, onProgress = ()
       }
     }
   } finally {
-    await page.close().catch(() => {});
+    if (!reusablePage) {
+      await page.close().catch(() => {});
+    }
   }
   return candidates.slice(0, 16);
 }
@@ -1207,6 +1209,14 @@ async function waitForGeminiJson(page, timeoutMs, debugBasePath) {
       }
     }
     const mainText = await page.locator("body").innerText().catch(() => "");
+    const blockingMessage = geminiBlockingMessage(mainText);
+    if (blockingMessage) {
+      if (debugBasePath) {
+        await page.screenshot({ path: `${debugBasePath}-gemini-blocked.png`, fullPage: true }).catch(() => {});
+        fs.writeFileSync(`${debugBasePath}-gemini-blocked.txt`, mainText);
+      }
+      throw new Error(blockingMessage);
+    }
     if (mainText && mainText === lastText) {
       stableSince = stableSince || Date.now();
       if (Date.now() - stableSince > 3500) {
@@ -1229,12 +1239,100 @@ async function waitForGeminiJson(page, timeoutMs, debugBasePath) {
   throw new Error("Gemini JSON response timed out");
 }
 
+function geminiBlockingMessage(value) {
+  const text = String(value || "").slice(-16000);
+  if (!text) {
+    return "";
+  }
+  if (/you(?:'| a)?ve reached (?:your )?(?:limit|usage limit)|rate limit|too many requests|quota exceeded|try again later/i.test(text)) {
+    return "Gemini limit reached or rate limited";
+  }
+  if (/storage (?:is )?full|not enough storage|data (?:is )?full|browser data full/i.test(text)) {
+    return "Gemini browser storage/data is full";
+  }
+  if (/something went wrong|server error|couldn(?:'|\u2019)?t complete|response stopped|failed to generate/i.test(text)) {
+    return "Gemini showed a server/response error";
+  }
+  return "";
+}
+
+function numericEnv(name, fallback, min, max) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function googleCaptchaMessage(page) {
+  const url = page.url();
+  let isSorryUrl = false;
+  try {
+    const parsed = new URL(url);
+    isSorryUrl = parsed.hostname.includes("google.") && parsed.pathname.startsWith("/sorry");
+  } catch (error) {
+    isSorryUrl = false;
+  }
+  const bodyText = await page.locator("body").innerText({ timeout: 2500 }).catch(() => "");
+  if (isSorryUrl || /our systems have detected unusual traffic|i'?m not a robot|recaptcha|google automatically detects requests/i.test(bodyText)) {
+    return "Google CAPTCHA/rate limit detected. Slow down or wait before retrying.";
+  }
+  return "";
+}
+
+function rowCompanyName(row) {
+  return cleanText(row.websiteName || row.companyName || row.consignee);
+}
+
+function workerMessage(workerIndex, parallelism, message) {
+  return parallelism > 1 ? `Gemini ${workerIndex + 1}: ${message}` : message;
+}
+
+function applySkippedResult(output, entry, message) {
+  for (const index of entry.indexes) {
+    output[index] = {
+      ...output[index],
+      websiteUrl: "",
+      email: "",
+      phone: "",
+      contactSource: `Gemini Playwright skipped: ${message}`
+    };
+  }
+}
+
+function applyGeminiResult(output, entry, result, resultListPath) {
+  for (const index of entry.indexes) {
+    output[index] = {
+      ...output[index],
+      websiteUrl: result.website_url,
+      email: result.email,
+      phone: result.phone_number,
+      contactSource: [
+        "Gemini Playwright",
+        result.source_url,
+        resultListPath,
+        result.notes
+      ].filter(Boolean).join("; ")
+    };
+  }
+}
+
 class GeminiPlaywrightAgent {
   constructor() {
     loadEnv(path.resolve(process.cwd(), ".env"));
     this.profileDir = path.resolve(process.cwd(), process.env.GEMINI_PROFILE_DIR || "agent-data/gemini-profile");
     this.headless = String(process.env.GEMINI_HEADLESS || "false").toLowerCase() === "true";
     this.timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 120000);
+    this.parallelism = numericEnv("GEMINI_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 15), 1, 15);
+    this.workerStaggerMs = numericEnv("GEMINI_WORKER_STAGGER_MS", 900, 0, 10000);
+    this.googleSearchGapMs = numericEnv("GOOGLE_SEARCH_GAP_MS", 4000, 1000, 60000);
+    this.googleCaptchaCooldownMs = numericEnv("GOOGLE_CAPTCHA_COOLDOWN_MS", 180000, 30000, 1800000);
+    this.googleNextSearchAt = 0;
+    this.googleCooldownUntil = 0;
     this.context = null;
     this.geminiPage = null;
   }
@@ -1249,7 +1347,11 @@ class GeminiPlaywrightAgent {
         channel: "chrome",
         headless: this.headless,
         viewport: { width: 1440, height: 1000 },
-        args: ["--disable-blink-features=AutomationControlled"]
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--start-minimized",
+          "--disable-features=CalculateNativeWinOcclusion"
+        ]
       });
     } catch (error) {
       const message = cleanText(error?.message || error);
@@ -1286,10 +1388,26 @@ class GeminiPlaywrightAgent {
     throw new Error("Gemini login timed out");
   }
 
+  async waitForGoogleSearchTurn(onWait = () => {}) {
+    while (true) {
+      const now = Date.now();
+      const waitMs = Math.max(this.googleNextSearchAt, this.googleCooldownUntil) - now;
+      if (waitMs <= 0) {
+        this.googleNextSearchAt = Date.now() + this.googleSearchGapMs;
+        return;
+      }
+      onWait(Math.ceil(waitMs / 1000));
+      await delay(Math.min(waitMs, 5000));
+    }
+  }
+
+  noteGoogleCaptcha() {
+    this.googleCooldownUntil = Math.max(this.googleCooldownUntil, Date.now() + this.googleCaptchaCooldownMs);
+  }
+
   async processRows(rows, jobDir, onProgress = () => {}) {
     const context = await this.launch();
-    const geminiPage = await this.waitForLogin((status, message) => onProgress({ status, message }));
-    const searchPage = await context.newPage();
+    const loginPage = await this.waitForLogin((status, message) => onProgress({ status, message }));
     const unique = new Map();
     rows.forEach((row, index) => {
       const key = companyKey(row);
@@ -1302,149 +1420,189 @@ class GeminiPlaywrightAgent {
 
     const output = rows.map((row) => ({ ...row }));
     const entries = [...unique.values()];
-    for (let position = 0; position < entries.length; position += 1) {
-      const entry = entries[position];
-      const row = entry.row;
-      const queryUrl = googleQueryUrl(row);
-      const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-google-results.json`);
-      onProgress({
-        status: "running",
-        processed: position,
-        total: entries.length,
-        company: cleanText(row.websiteName || row.companyName || row.consignee),
-        message: "Opening Google query"
-      });
-
-      try {
-        await searchPage.goto(queryUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-        await dismissGoogleConsent(searchPage);
-        await searchPage.waitForTimeout(1800);
-        const organicResults = await googleOrganicResults(searchPage, 15);
-        fs.writeFileSync(resultListPath, JSON.stringify({
-          queryUrl,
-          company: cleanText(row.websiteName || row.companyName || row.consignee),
-          country: cleanText(row.country),
-          results: organicResults
-        }, null, 2));
-        if (!organicResults.length) {
-          throw new Error("No non-sponsored Google organic results were extracted");
-        }
-        onProgress({
-          status: "running",
-          processed: position,
-          total: entries.length,
-          company: cleanText(row.websiteName || row.companyName || row.consignee),
-          message: `Checking organic result pages for visible contacts (${organicResults.length} links)`
-        });
-        const contactCandidates = await collectContactCandidates(context, organicResults, () => {});
-        fs.writeFileSync(resultListPath, JSON.stringify({
-          queryUrl,
-          company: cleanText(row.websiteName || row.companyName || row.consignee),
-          country: cleanText(row.country),
-          results: organicResults,
-          contactCandidates
-        }, null, 2));
-        const firstOrganicUrl = organicResults[0].url;
-
-        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
-        if (!await findPromptBox(geminiPage)) {
-          await this.waitForLogin((status, message) => onProgress({
-            status,
-            processed: position,
-            total: entries.length,
-            company: cleanText(row.websiteName || row.companyName || row.consignee),
-            message
-          }));
-        }
-        const debugBasePath = path.join(jobDir, String(position + 1).padStart(5, "0"));
-        const prompt = resultPrompt(row, queryUrl, organicResults, contactCandidates);
-        await fillPrompt(geminiPage, prompt);
-        onProgress({
-          status: "running",
-          processed: position,
-          total: entries.length,
-          company: cleanText(row.websiteName || row.companyName || row.consignee),
-          message: `Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`
-        });
-        await sendPrompt(geminiPage, prompt, debugBasePath);
-        onProgress({
-          status: "running",
-          processed: position,
-          total: entries.length,
-          company: cleanText(row.websiteName || row.companyName || row.consignee),
-          message: "Waiting for strict Gemini JSON"
-        });
-        const parsed = await waitForGeminiJson(
-          geminiPage,
-          this.timeoutMs,
-          debugBasePath
-        );
-        const result = normalizedFirstResult(parsed, row, firstOrganicUrl);
-        if (result.phone_number && shouldClearRejectedContact(result)) {
-          result.phone_number = "";
-        }
-        if (result.email && shouldClearRejectedContact(result)) {
-          result.email = "";
-        }
-        if (!result.phone_number) {
-          const phoneCandidate = contactCandidates.find((candidate) => candidate.type === "phone" && trustedFallbackCandidate(candidate));
-          if (phoneCandidate) {
-            result.phone_number = phoneCandidate.value;
-            result.source_url = phoneCandidate.source_url || result.source_url;
-            result.notes = cleanText(`${result.notes} Phone fallback from rank ${phoneCandidate.rank}: ${phoneCandidate.source_url}.`);
-          }
-        }
-        if (!result.email) {
-          const emailCandidate = contactCandidates.find((candidate) => candidate.type === "email" && trustedFallbackCandidate(candidate));
-          if (emailCandidate) {
-            result.email = emailCandidate.value;
-            result.source_url = result.source_url || emailCandidate.source_url;
-            result.notes = cleanText(`${result.notes} Email fallback from rank ${emailCandidate.rank}: ${emailCandidate.source_url}.`);
-          }
-        }
-        for (const index of entry.indexes) {
-          output[index] = {
-            ...output[index],
-            websiteUrl: result.website_url,
-            email: result.email,
-            phone: result.phone_number,
-            contactSource: [
-              "Gemini Playwright",
-              result.source_url,
-              resultListPath,
-              result.notes
-            ].filter(Boolean).join("; ")
-          };
-        }
-        onProgress({
-          status: "running",
-          processed: position + 1,
-          total: entries.length,
-          company: result.company_name,
-          message: "Gemini JSON received"
-        });
-      } catch (error) {
-        const message = cleanText(error?.message || error);
-        for (const index of entry.indexes) {
-          output[index] = {
-            ...output[index],
-            websiteUrl: "",
-            email: "",
-            phone: "",
-            contactSource: `Gemini Playwright skipped: ${message}`
-          };
-        }
-        onProgress({
-          status: "running",
-          processed: position + 1,
-          total: entries.length,
-          company: cleanText(row.websiteName || row.companyName || row.consignee),
-          message: `Skipped: ${message}`
-        });
-      }
+    if (!entries.length) {
+      return output;
     }
-    await searchPage.close().catch(() => {});
+
+    const parallelism = Math.min(this.parallelism, entries.length);
+    let nextPosition = 0;
+    let completed = 0;
+    onProgress({
+      status: "running",
+      processed: 0,
+      total: entries.length,
+      company: "",
+      message: `Starting ${parallelism} parallel Gemini tab${parallelism === 1 ? "" : "s"}`
+    });
+
+    const workers = Array.from({ length: parallelism }, async (_, workerIndex) => {
+      if (workerIndex && this.workerStaggerMs) {
+        await new Promise((resolve) => setTimeout(resolve, workerIndex * this.workerStaggerMs));
+      }
+      const searchPage = await context.newPage();
+      const geminiPage = workerIndex === 0 && loginPage && !loginPage.isClosed()
+        ? loginPage
+        : await context.newPage();
+      try {
+        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        while (true) {
+          const position = nextPosition;
+          nextPosition += 1;
+          if (position >= entries.length) {
+            break;
+          }
+          const result = await this.processEntry({
+            context,
+            searchPage,
+            geminiPage,
+            entry: entries[position],
+            position,
+            total: entries.length,
+            jobDir,
+            output,
+            workerIndex,
+            parallelism,
+            completedCount: () => completed,
+            onProgress
+          });
+          completed += 1;
+          onProgress({
+            status: "running",
+            processed: completed,
+            total: entries.length,
+            company: result.company,
+            message: workerMessage(workerIndex, parallelism, result.message)
+          });
+        }
+      } finally {
+        await searchPage.close().catch(() => {});
+        if (workerIndex !== 0) {
+          await geminiPage.close().catch(() => {});
+        }
+      }
+    });
+
+    await Promise.all(workers);
     return output;
+  }
+
+  async processEntry({
+    context,
+    searchPage,
+    geminiPage,
+    entry,
+    position,
+    total,
+    jobDir,
+    output,
+    workerIndex,
+    parallelism,
+    completedCount,
+    onProgress
+  }) {
+    const row = entry.row;
+    const company = rowCompanyName(row);
+    const queryUrl = googleQueryUrl(row);
+    const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-google-results.json`);
+    const progress = (message, status = "running") => onProgress({
+      status,
+      processed: completedCount(),
+      total,
+      company,
+      message: workerMessage(workerIndex, parallelism, message)
+    });
+
+    try {
+      progress("Opening Google query");
+      await this.waitForGoogleSearchTurn((seconds) => {
+        progress(`Google cooldown ${seconds}s`);
+      });
+      await searchPage.goto(queryUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await dismissGoogleConsent(searchPage);
+      await searchPage.waitForTimeout(1800);
+      const captchaMessage = await googleCaptchaMessage(searchPage);
+      if (captchaMessage) {
+        this.noteGoogleCaptcha();
+        throw new Error(captchaMessage);
+      }
+      const organicResults = await googleOrganicResults(searchPage, 15);
+      fs.writeFileSync(resultListPath, JSON.stringify({
+        queryUrl,
+        company,
+        country: cleanText(row.country),
+        results: organicResults
+      }, null, 2));
+      if (!organicResults.length) {
+        throw new Error("No non-sponsored Google organic results were extracted");
+      }
+      progress(`Checking organic result pages for visible contacts (${organicResults.length} links)`);
+      const contactCandidates = await collectContactCandidates(context, organicResults, () => {}, searchPage);
+      fs.writeFileSync(resultListPath, JSON.stringify({
+        queryUrl,
+        company,
+        country: cleanText(row.country),
+        results: organicResults,
+        contactCandidates
+      }, null, 2));
+      const firstOrganicUrl = organicResults[0].url;
+
+      await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
+      if (!await findPromptBox(geminiPage)) {
+        await this.waitForLogin((status, message) => onProgress({
+          status,
+          processed: completedCount(),
+          total,
+          company,
+          message: workerMessage(workerIndex, parallelism, message)
+        }));
+      }
+      const debugBasePath = path.join(jobDir, String(position + 1).padStart(5, "0"));
+      const prompt = resultPrompt(row, queryUrl, organicResults, contactCandidates);
+      await fillPrompt(geminiPage, prompt);
+      progress(`Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`);
+      await sendPrompt(geminiPage, prompt, debugBasePath);
+      progress("Waiting for strict Gemini JSON");
+      const parsed = await waitForGeminiJson(
+        geminiPage,
+        this.timeoutMs,
+        debugBasePath
+      );
+      const result = normalizedFirstResult(parsed, row, firstOrganicUrl);
+      if (result.phone_number && shouldClearRejectedContact(result)) {
+        result.phone_number = "";
+      }
+      if (result.email && shouldClearRejectedContact(result)) {
+        result.email = "";
+      }
+      if (!result.phone_number) {
+        const phoneCandidate = contactCandidates.find((candidate) => candidate.type === "phone" && trustedFallbackCandidate(candidate));
+        if (phoneCandidate) {
+          result.phone_number = phoneCandidate.value;
+          result.source_url = phoneCandidate.source_url || result.source_url;
+          result.notes = cleanText(`${result.notes} Phone fallback from rank ${phoneCandidate.rank}: ${phoneCandidate.source_url}.`);
+        }
+      }
+      if (!result.email) {
+        const emailCandidate = contactCandidates.find((candidate) => candidate.type === "email" && trustedFallbackCandidate(candidate));
+        if (emailCandidate) {
+          result.email = emailCandidate.value;
+          result.source_url = result.source_url || emailCandidate.source_url;
+          result.notes = cleanText(`${result.notes} Email fallback from rank ${emailCandidate.rank}: ${emailCandidate.source_url}.`);
+        }
+      }
+      applyGeminiResult(output, entry, result, resultListPath);
+      return {
+        company: result.company_name || company,
+        message: "Gemini JSON received"
+      };
+    } catch (error) {
+      const message = cleanText(error?.message || error);
+      applySkippedResult(output, entry, message);
+      return {
+        company,
+        message: `Skipped: ${message}`
+      };
+    }
   }
 
   async close() {

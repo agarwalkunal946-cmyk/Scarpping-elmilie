@@ -33,7 +33,7 @@
 
 ## Gemini Website
 
-The automation uses the model currently selected by the signed-in Gemini website. Model availability, limits, and results depend on that Gemini account.
+The automation uses the model currently selected by the signed-in Gemini website. It runs multiple Gemini tabs in parallel by default. Model availability, limits, and results depend on that Gemini account.
 
 ## Final Columns
 

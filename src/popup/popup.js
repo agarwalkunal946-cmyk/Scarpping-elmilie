@@ -154,6 +154,7 @@ async function refreshPageStatus() {
 }
 
 function setBusy(isBusy, message = "Working", detail = "You may switch tabs; the local agent keeps running.") {
+  document.body.classList.toggle("busy-lock", Boolean(isBusy));
   for (const button of [els.captureVisible, els.captureAll, els.enrichContacts, els.exportCsv, els.exportExcel]) {
     button.disabled = isBusy;
   }
@@ -715,7 +716,15 @@ async function resumeAgentJob() {
     return;
   }
   if (["queued", "running", "waiting_login"].includes(job.status)) {
-    await watchAgentJob(job);
+    try {
+      const completed = await watchAgentJob(job);
+      if (completed?.status === "completed") {
+        els.activity.textContent = agentLookupMessage(completed);
+      }
+    } finally {
+      setBusy(false);
+      setButtons();
+    }
   } else if (job.status === "completed") {
     await loadCompletedAgentRows();
   }
@@ -724,15 +733,26 @@ async function resumeAgentJob() {
 async function watchAgentJob(initialJob) {
   let job = initialJob;
   while (job && !["completed", "failed"].includes(job.status)) {
+    const storedCompleted = await completedAgentJobFromStorage(job.id);
+    if (storedCompleted) {
+      job = storedCompleted;
+      break;
+    }
     const progress = job.total ? `${job.processed || 0}/${job.total}` : "";
     setBusy(
       true,
       job.status === "waiting_login" ? "Gemini login required" : `Playwright working ${progress}`.trim(),
       job.message || job.company || "Google result links and Gemini JSON processing."
     );
-    await sleep(1500);
+    const nearDone = Number(job.total || 0) > 0 && Number(job.processed || 0) >= Number(job.total || 0) - 1;
+    await sleep(nearDone ? 400 : 1500);
     job = await chrome.runtime.sendMessage({ type: "GET_PLAYWRIGHT_JOB" });
     if (job?.error) {
+      const completedAfterError = await completedAgentJobFromStorage(initialJob.id);
+      if (completedAfterError) {
+        job = completedAfterError;
+        break;
+      }
       throw new Error(job.error);
     }
   }
@@ -744,6 +764,20 @@ async function watchAgentJob(initialJob) {
   }
   if (job?.status === "completed") {
     await loadCompletedAgentRows();
+  }
+  return job;
+}
+
+async function completedAgentJobFromStorage(jobId) {
+  const stored = await chrome.storage.local.get(["latestAgentJob", "latestRows"]);
+  const job = stored.latestAgentJob;
+  if (job?.id !== jobId || job.status !== "completed") {
+    return null;
+  }
+  if (Array.isArray(stored.latestRows)) {
+    state.rows = stored.latestRows;
+    render();
+    return { ...job, rows: stored.latestRows };
   }
   return job;
 }

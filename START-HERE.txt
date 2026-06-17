@@ -1,4 +1,4 @@
-EXIM Elite Contact Exporter v1.7.2
+EXIM Elite Contact Exporter v1.7.3
 
 1. Open Terminal in this folder.
 2. Run: npm install
@@ -24,7 +24,8 @@ Mac and Windows use the same npm commands. The agent handles Command+V on
 macOS and Control+V on Windows/Linux internally.
 
 Every contact lookup uses the report's captured hover Google query URL first.
-The Google results screenshot is copied to the clipboard, pasted into Gemini,
-then sent with the strict JSON prompt. The plus/upload menu is not used.
+The agent extracts Google organic links and visible contact candidates as text,
+then sends a strict JSON prompt to Gemini. It runs up to 15 Gemini tabs in
+parallel by default. To tune it, run the agent with GEMINI_PARALLELISM=1..15.
 
 No Gemini API key is required. Do not put account passwords in this folder.

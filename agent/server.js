@@ -92,8 +92,14 @@ async function runQueue() {
   try {
     job.rows = await agent.processRows(job.inputRows, jobScreenshots, (progress) => {
       job.status = progress.status || "running";
-      job.processed = Number(progress.processed || job.processed || 0);
-      job.total = Number(progress.total || job.total || 0);
+      const nextProcessed = Number(progress.processed);
+      const nextTotal = Number(progress.total);
+      if (Number.isFinite(nextProcessed)) {
+        job.processed = Math.max(Number(job.processed || 0), nextProcessed);
+      }
+      if (Number.isFinite(nextTotal) && nextTotal >= 0) {
+        job.total = nextTotal;
+      }
       job.company = progress.company || "";
       job.message = progress.message || "";
       job.updatedAt = new Date().toISOString();

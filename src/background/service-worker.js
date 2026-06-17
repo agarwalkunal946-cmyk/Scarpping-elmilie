@@ -132,7 +132,12 @@ async function pollStoredJob() {
   if (["completed", "failed"].includes(current.status)) {
     return current;
   }
-  const job = await agentRequest(`/jobs/${encodeURIComponent(current.id)}`);
+  let job;
+  try {
+    job = await agentRequest(`/jobs/${encodeURIComponent(current.id)}`);
+  } catch (error) {
+    return markStoredJobFailed(current, error?.message || String(error));
+  }
   const metadata = jobMetadata(job);
   await chrome.storage.local.set({ latestAgentJob: metadata });
   if (job.status === "completed" && Array.isArray(job.rows)) {
@@ -152,6 +157,21 @@ async function pollStoredJob() {
     await chrome.action.setBadgeText({ text: job.status === "waiting_login" ? "IN" : "AI" });
   }
   return metadata;
+}
+
+async function markStoredJobFailed(job, message) {
+  const failed = {
+    ...job,
+    status: "failed",
+    updatedAt: new Date().toISOString(),
+    error: message,
+    message: "Playwright agent stopped before the job finished"
+  };
+  await chrome.storage.local.set({ latestAgentJob: failed });
+  await chrome.action.setBadgeBackgroundColor({ color: "#b42318" });
+  await chrome.action.setBadgeText({ text: "!" });
+  await chrome.alarms.clear(POLL_ALARM);
+  return failed;
 }
 
 function jobMetadata(job) {
