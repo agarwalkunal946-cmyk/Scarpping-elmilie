@@ -715,25 +715,26 @@ async function resumeAgentJob() {
   if (!job?.id) {
     return;
   }
-  if (["queued", "running", "waiting_login"].includes(job.status)) {
+  if (["queued", "running", "waiting_login", "waiting_captcha"].includes(job.status)) {
     try {
       const completed = await watchAgentJob(job);
-      if (completed?.status === "completed") {
+      if (["completed", "partial"].includes(completed?.status)) {
         els.activity.textContent = agentLookupMessage(completed);
       }
     } finally {
       setBusy(false);
       setButtons();
     }
-  } else if (job.status === "completed") {
+  } else if (["completed", "partial"].includes(job.status)) {
     await loadCompletedAgentRows();
+    els.activity.textContent = agentLookupMessage(job);
   }
 }
 
 async function watchAgentJob(initialJob) {
   let job = initialJob;
-  while (job && !["completed", "failed"].includes(job.status)) {
-    const storedCompleted = await completedAgentJobFromStorage(job.id);
+  while (job && !["completed", "partial", "failed"].includes(job.status)) {
+    const storedCompleted = await terminalAgentJobFromStorage(job.id);
     if (storedCompleted) {
       job = storedCompleted;
       break;
@@ -741,14 +742,16 @@ async function watchAgentJob(initialJob) {
     const progress = job.total ? `${job.processed || 0}/${job.total}` : "";
     setBusy(
       true,
-      job.status === "waiting_login" ? "Gemini login required" : `Playwright working ${progress}`.trim(),
+      job.status === "waiting_captcha"
+        ? "CAPTCHA solve required"
+        : (job.status === "waiting_login" ? "Gemini login required" : `Playwright working ${progress}`.trim()),
       job.message || job.company || "Google result links and Gemini JSON processing."
     );
     const nearDone = Number(job.total || 0) > 0 && Number(job.processed || 0) >= Number(job.total || 0) - 1;
     await sleep(nearDone ? 400 : 1500);
     job = await chrome.runtime.sendMessage({ type: "GET_PLAYWRIGHT_JOB" });
     if (job?.error) {
-      const completedAfterError = await completedAgentJobFromStorage(initialJob.id);
+      const completedAfterError = await terminalAgentJobFromStorage(initialJob.id);
       if (completedAfterError) {
         job = completedAfterError;
         break;
@@ -759,19 +762,19 @@ async function watchAgentJob(initialJob) {
   if (job?.status === "failed") {
     throw new Error(job.error || job.message || "Playwright Gemini job failed");
   }
-  if (job?.status === "completed" && Array.isArray(job.rows)) {
+  if (["completed", "partial"].includes(job?.status) && Array.isArray(job.rows)) {
     await chrome.storage.local.set({ latestRows: job.rows });
   }
-  if (job?.status === "completed") {
+  if (["completed", "partial"].includes(job?.status)) {
     await loadCompletedAgentRows();
   }
   return job;
 }
 
-async function completedAgentJobFromStorage(jobId) {
+async function terminalAgentJobFromStorage(jobId) {
   const stored = await chrome.storage.local.get(["latestAgentJob", "latestRows"]);
   const job = stored.latestAgentJob;
-  if (job?.id !== jobId || job.status !== "completed") {
+  if (job?.id !== jobId || !["completed", "partial"].includes(job.status)) {
     return null;
   }
   if (Array.isArray(stored.latestRows)) {
@@ -794,9 +797,14 @@ function agentLookupMessage(job) {
   const rows = Array.isArray(job?.rows) ? job.rows : state.rows;
   const info = window.EximProcessor.summary(rows, state.duplicatesRemoved);
   if (info.withWebsite || info.withEmail || info.withPhone) {
-    return `Playwright complete: ${info.withWebsite} website, ${info.withEmail} email, ${info.withPhone} phone`;
+    const prefix = job?.status === "partial"
+      ? `Agent stopped at ${Number(job.processed || 0)}/${Number(job.total || 0)}; saved`
+      : "Playwright complete";
+    return `${prefix}: ${info.withWebsite} website, ${info.withEmail} email, ${info.withPhone} phone`;
   }
-  return "Playwright complete: no first-result contact found";
+  return job?.status === "partial"
+    ? `Agent stopped at ${Number(job.processed || 0)}/${Number(job.total || 0)}; saved rows are ready`
+    : "Playwright complete: no first-result contact found";
 }
 
 function compactMessage(value) {

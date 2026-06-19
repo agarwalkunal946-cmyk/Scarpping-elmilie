@@ -1,5 +1,7 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const { chromium } = require("playwright-core");
 
 const BLOCKED_HOSTS = [
@@ -383,6 +385,7 @@ function resultPrompt(row, queryUrl, organicResults = [], contactCandidates = []
     "Do not use generic portal support/sales/corporate numbers from site headers or footers, including ExportersIndia, Tendata, Volza, Panjiva, Trademo, or Eximpedia support numbers.",
     "Do not invent a phone/email and never complete a masked or partially hidden number.",
     "If no full same-company email or phone is visible in Rank 1 or the contact candidates, use an empty string for that field.",
+    "Always set company_name to the Company value, even when every contact field is blank.",
     "The notes field must briefly say which first result URL was used and which source provided each contact field.",
     "Return ONLY one JSON object with exactly these keys:",
     '{"company_name":"","website_url":"","phone_number":"","email":"","source_url":"","confidence":0,"notes":""}',
@@ -1232,9 +1235,7 @@ async function waitForGeminiJson(page, timeoutMs, debugBasePath) {
     await page.waitForTimeout(1000);
   }
   if (debugBasePath) {
-    await page.screenshot({ path: `${debugBasePath}-gemini-timeout.png`, fullPage: true }).catch(() => {});
     fs.writeFileSync(`${debugBasePath}-gemini-timeout.txt`, lastText);
-    fs.writeFileSync(`${debugBasePath}-gemini-timeout.html`, await page.content().catch(() => ""));
   }
   throw new Error("Gemini JSON response timed out");
 }
@@ -1262,6 +1263,138 @@ function numericEnv(name, fallback, min, max) {
     return fallback;
   }
   return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function booleanEnv(name, fallback) {
+  const value = String(process.env[name] || "").trim().toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+  return ["1", "true", "yes", "on"].includes(value);
+}
+
+function clearProfileCaches(profileDir) {
+  if (["SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"]
+    .some((name) => fs.existsSync(path.join(profileDir, name)))) {
+    return;
+  }
+  let profileNames = [];
+  try {
+    profileNames = fs.existsSync(profileDir)
+      ? fs.readdirSync(profileDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && (entry.name === "Default" || /^Profile \d+$/.test(entry.name)))
+        .map((entry) => entry.name)
+      : [];
+  } catch (error) {
+    return;
+  }
+  const remove = (targetPath) => {
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+    } catch (error) {
+      // Cache cleanup is best-effort; a locked cache must not block the agent.
+    }
+  };
+  const cachePaths = [
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    path.join("Service Worker", "CacheStorage"),
+    path.join("Service Worker", "ScriptCache")
+  ];
+  for (const profileName of profileNames) {
+    for (const relativePath of cachePaths) {
+      remove(path.join(profileDir, profileName, relativePath));
+    }
+  }
+  for (const relativePath of ["GrShaderCache", "GraphiteDawnCache", "ShaderCache", "component_crx_cache"]) {
+    remove(path.join(profileDir, relativePath));
+  }
+}
+
+let memorySample = { measuredAt: 0, availableMb: 0 };
+
+function availableMemoryMb() {
+  if (Date.now() - memorySample.measuredAt < 1500) {
+    return memorySample.availableMb;
+  }
+  let availableBytes = os.freemem();
+  try {
+    if (process.platform === "darwin") {
+      const output = execFileSync("/usr/bin/memory_pressure", ["-Q"], {
+        encoding: "utf8",
+        timeout: 1500,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      const percentage = Number(output.match(/free percentage:\s*(\d+)/i)?.[1]);
+      if (Number.isFinite(percentage)) {
+        availableBytes = os.totalmem() * percentage / 100;
+      }
+    } else if (process.platform === "linux" && fs.existsSync("/proc/meminfo")) {
+      const availableKb = Number(fs.readFileSync("/proc/meminfo", "utf8").match(/^MemAvailable:\s+(\d+)/m)?.[1]);
+      if (Number.isFinite(availableKb)) {
+        availableBytes = availableKb * 1024;
+      }
+    }
+  } catch (error) {
+    // Fall back to Node's native free-memory reading.
+  }
+  memorySample = {
+    measuredAt: Date.now(),
+    availableMb: Math.max(0, Math.floor(availableBytes / (1024 * 1024)))
+  };
+  return memorySample.availableMb;
+}
+
+function totalMemoryMb() {
+  return Math.max(1, Math.floor(os.totalmem() / (1024 * 1024)));
+}
+
+function defaultSystemReserveMemoryMb(totalMb = totalMemoryMb()) {
+  return Math.max(1536, Math.floor(totalMb * 0.2));
+}
+
+function hardwareParallelismCap(totalMb = totalMemoryMb(), cpuCount = os.cpus().length || 4) {
+  const memoryCap = totalMb <= 6144
+    ? 2
+    : (totalMb <= 10240
+      ? 3
+      : (totalMb <= 16384
+        ? 5
+        : (totalMb <= 24576 ? 7 : 10)));
+  const cpuCap = cpuCount <= 4
+    ? 2
+    : (cpuCount <= 8 ? 5 : (cpuCount <= 12 ? 8 : 10));
+  return Math.max(1, Math.min(memoryCap, cpuCap));
+}
+
+function adaptiveParallelismLimit({
+  requested,
+  entriesCount,
+  totalMb = totalMemoryMb(),
+  freeMb = availableMemoryMb(),
+  cpuCount = os.cpus().length || 4,
+  maxParallelism = 10,
+  pageMemoryMb = 700,
+  systemReserveMemoryMb = defaultSystemReserveMemoryMb(totalMb),
+  auto = true
+}) {
+  const requestedCount = Math.max(1, Math.floor(Number(requested) || 1));
+  const entryCount = Math.max(1, Math.floor(Number(entriesCount) || 1));
+  const configuredMax = Math.max(1, Math.floor(Number(maxParallelism) || requestedCount));
+  const base = Math.min(requestedCount, entryCount, configuredMax);
+  if (!auto) {
+    return base;
+  }
+  const usableFreeMb = Math.max(0, Number(freeMb || 0) - Number(systemReserveMemoryMb || 0));
+  const memoryCap = usableFreeMb > 0
+    ? Math.max(1, Math.floor(usableFreeMb / Math.max(256, Number(pageMemoryMb || 700))))
+    : 1;
+  return Math.max(1, Math.min(
+    base,
+    memoryCap,
+    hardwareParallelismCap(Number(totalMb || 0), Number(cpuCount || 1))
+  ));
 }
 
 function delay(ms) {
@@ -1321,38 +1454,80 @@ function applyGeminiResult(output, entry, result, resultListPath) {
   }
 }
 
+function isRetryableGeminiJsonError(message) {
+  return /Gemini JSON response timed out|Gemini showed a server\/response error|Gemini prompt was filled, but the Send button was not activated|Gemini browser storage\/data is full/i
+    .test(String(message || ""));
+}
+
+function fallbackGeminiResult(row, sourceUrl, reason) {
+  const company = cleanText(row.websiteName || row.companyName || row.consignee);
+  const url = normalizeFirstResultUrl(sourceUrl);
+  return {
+    company_name: company,
+    website_url: url,
+    phone_number: "",
+    email: "",
+    source_url: url,
+    confidence: 0,
+    notes: cleanText(`Empty JSON fallback after Gemini retry: ${reason || "no strict JSON returned"}`)
+  };
+}
+
 class GeminiPlaywrightAgent {
   constructor() {
     loadEnv(path.resolve(process.cwd(), ".env"));
     this.profileDir = path.resolve(process.cwd(), process.env.GEMINI_PROFILE_DIR || "agent-data/gemini-profile");
-    this.headless = String(process.env.GEMINI_HEADLESS || "false").toLowerCase() === "true";
-    this.timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 120000);
-    this.parallelism = numericEnv("GEMINI_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 15), 1, 15);
+    this.headless = booleanEnv("GEMINI_HEADLESS", true);
+    this.timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 30000);
+    this.geminiJsonRetries = numericEnv("GEMINI_JSON_RETRIES", 2, 0, 5);
+    this.parallelism = numericEnv("GEMINI_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
+    this.parallelismAuto = booleanEnv("GEMINI_PARALLELISM_AUTO", true);
+    this.maxParallelism = numericEnv("GEMINI_MAX_PARALLELISM", 10, 1, 30);
+    this.pageMemoryMb = numericEnv("GEMINI_PAGE_MEMORY_MB", 700, 256, 4096);
+    this.systemReserveMemoryMb = numericEnv("GEMINI_SYSTEM_RESERVE_MEMORY_MB", defaultSystemReserveMemoryMb(), 512, 32768);
+    this.diskCacheMb = numericEnv("GEMINI_DISK_CACHE_MB", 128, 32, 1024);
+    this.blockHeavyResources = booleanEnv("GEMINI_BLOCK_HEAVY_RESOURCES", true);
+    this.minFreeMemoryMb = numericEnv("GEMINI_MIN_FREE_MEMORY_MB", 2048, 0, 32768);
     this.workerStaggerMs = numericEnv("GEMINI_WORKER_STAGGER_MS", 900, 0, 10000);
     this.googleSearchGapMs = numericEnv("GOOGLE_SEARCH_GAP_MS", 4000, 1000, 60000);
     this.googleCaptchaCooldownMs = numericEnv("GOOGLE_CAPTCHA_COOLDOWN_MS", 180000, 30000, 1800000);
     this.googleNextSearchAt = 0;
     this.googleCooldownUntil = 0;
     this.context = null;
+    this.contextHeadless = null;
     this.geminiPage = null;
+    this.activeWorkerPages = 0;
+    this.currentPageLimit = 1;
+    this.manualIntervention = null;
+    this.interventionSerial = 0;
   }
 
-  async launch() {
-    if (this.context) {
+  async launch(headless = this.headless) {
+    if (this.context && this.contextHeadless === headless) {
       return this.context;
     }
+    if (this.context) {
+      if (this.activeWorkerPages > 0) {
+        throw new Error("Cannot switch Playwright browser mode while worker pages are active");
+      }
+      await this.closeContext();
+    }
     fs.mkdirSync(this.profileDir, { recursive: true });
+    clearProfileCaches(this.profileDir);
     try {
       this.context = await chromium.launchPersistentContext(this.profileDir, {
         channel: "chrome",
-        headless: this.headless,
+        headless,
         viewport: { width: 1440, height: 1000 },
         args: [
           "--disable-blink-features=AutomationControlled",
-          "--start-minimized",
-          "--disable-features=CalculateNativeWinOcclusion"
+          "--disable-features=CalculateNativeWinOcclusion",
+          `--disk-cache-size=${this.diskCacheMb * 1024 * 1024}`,
+          `--media-cache-size=${Math.min(this.diskCacheMb, 64) * 1024 * 1024}`,
+          ...(headless ? [] : ["--no-first-run"])
         ]
       });
+      this.contextHeadless = headless;
     } catch (error) {
       const message = cleanText(error?.message || error);
       if (/profile is already in use|opening in existing browser session/i.test(message)) {
@@ -1363,20 +1538,40 @@ class GeminiPlaywrightAgent {
       }
       throw error;
     }
+    if (this.blockHeavyResources) {
+      await this.context.route("**/*", async (route) => {
+        const resourceType = route.request().resourceType();
+        const requestUrl = route.request().url();
+        const isAuthChallenge = /accounts\.google\.com|recaptcha|\/challenge\//i.test(requestUrl);
+        const blockedTypes = headless
+          ? ["font", "image", "media", "texttrack", "stylesheet"]
+          : ["font", "image", "media", "texttrack"];
+        if (!isAuthChallenge && blockedTypes.includes(resourceType)) {
+          await route.abort().catch(() => {});
+          return;
+        }
+        await route.continue().catch(() => {});
+      });
+    }
     return this.context;
   }
 
-  async openLogin() {
-    const context = await this.launch();
+  async openLogin(options = {}) {
+    const context = await this.launch(options.visible ? false : this.headless);
+    const reusablePage = context.pages().find((page) => !page.isClosed());
     this.geminiPage = this.geminiPage && !this.geminiPage.isClosed()
       ? this.geminiPage
-      : await context.newPage();
+      : (reusablePage || await context.newPage());
     await this.geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded" });
     return this.geminiPage;
   }
 
-  async waitForLogin(onStatus) {
-    const page = await this.openLogin();
+  async waitForLogin(onStatus, existingPage = null) {
+    const page = existingPage || await this.openLogin();
+    return this.waitForLoginPage(page, onStatus);
+  }
+
+  async waitForLoginPage(page, onStatus) {
     const deadline = Date.now() + 10 * 60 * 1000;
     while (Date.now() < deadline) {
       if (await findPromptBox(page)) {
@@ -1388,7 +1583,122 @@ class GeminiPlaywrightAgent {
     throw new Error("Gemini login timed out");
   }
 
+  async waitForPrompt(page, timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await findPromptBox(page)) {
+        return true;
+      }
+      await page.waitForTimeout(750);
+    }
+    return false;
+  }
+
+  async closeContext() {
+    await this.context?.close().catch(() => {});
+    this.context = null;
+    this.contextHeadless = null;
+    this.geminiPage = null;
+    this.activeWorkerPages = 0;
+  }
+
+  async waitForManualIntervention({ page, trackedPage, kind, url, onStatus = () => {} }) {
+    if (this.manualIntervention) {
+      if (trackedPage) {
+        await this.closeWorkerPage(page);
+      } else {
+        await page?.close().catch(() => {});
+      }
+      return this.manualIntervention.promise;
+    }
+
+    let resolveIntervention;
+    let rejectIntervention;
+    const promise = new Promise((resolve, reject) => {
+      resolveIntervention = resolve;
+      rejectIntervention = reject;
+    });
+    this.interventionSerial += 1;
+    this.manualIntervention = { promise, kind };
+
+    try {
+      onStatus(
+        kind === "captcha" ? "waiting_captcha" : "waiting_login",
+        kind === "captcha"
+          ? "Opening Chrome now for CAPTCHA. Interrupted rows will retry automatically."
+          : "Opening Chrome now for Gemini login. Interrupted rows will retry automatically."
+      );
+      if (trackedPage) {
+        await this.closeWorkerPage(page);
+      } else {
+        await page?.close().catch(() => {});
+      }
+      await this.closeContext();
+      const visibleContext = await this.launch(false);
+      const visiblePage = visibleContext.pages().find((candidate) => !candidate.isClosed()) || await visibleContext.newPage();
+      await visiblePage.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+      await visiblePage.bringToFront().catch(() => {});
+      await visiblePage.waitForTimeout(1200);
+
+      const status = kind === "captcha" ? "waiting_captcha" : "waiting_login";
+      const message = kind === "captcha"
+        ? "Solve the CAPTCHA in the opened Chrome window. Background processing will resume automatically."
+        : "Complete Gemini login in the opened Chrome window. Background processing will resume automatically.";
+      const deadline = Date.now() + 15 * 60 * 1000;
+      let solved = false;
+      while (Date.now() < deadline) {
+        if (visiblePage.isClosed()) {
+          throw new Error(`Manual ${kind} window was closed before completion`);
+        }
+        onStatus(status, message);
+        solved = kind === "captcha"
+          ? !await googleCaptchaMessage(visiblePage)
+          : Boolean(await findPromptBox(visiblePage));
+        if (solved) {
+          break;
+        }
+        await visiblePage.waitForTimeout(1500);
+      }
+      if (!solved) {
+        throw new Error(`Manual ${kind} timed out`);
+      }
+
+      await this.closeContext();
+      const backgroundContext = await this.launch(this.headless);
+      for (const idlePage of backgroundContext.pages()) {
+        await idlePage.close().catch(() => {});
+      }
+      resolveIntervention();
+    } catch (error) {
+      rejectIntervention(error);
+      return promise;
+    } finally {
+      this.manualIntervention = null;
+    }
+    return promise;
+  }
+
+  async ensureGeminiLogin(onStatus = () => {}) {
+    const page = await this.openLogin();
+    if (await this.waitForPrompt(page, 15000)) {
+      await page.close().catch(() => {});
+      this.geminiPage = null;
+      return;
+    }
+    this.geminiPage = null;
+    await this.waitForManualIntervention({
+      page,
+      trackedPage: false,
+      kind: "login",
+      url: "https://gemini.google.com/app",
+      onStatus
+    });
+  }
+
   async waitForGoogleSearchTurn(onWait = () => {}) {
+    while (this.manualIntervention) {
+      await this.manualIntervention.promise;
+    }
     while (true) {
       const now = Date.now();
       const waitMs = Math.max(this.googleNextSearchAt, this.googleCooldownUntil) - now;
@@ -1405,9 +1715,61 @@ class GeminiPlaywrightAgent {
     this.googleCooldownUntil = Math.max(this.googleCooldownUntil, Date.now() + this.googleCaptchaCooldownMs);
   }
 
+  async newWorkerPage(onWait = () => {}) {
+    while (this.manualIntervention) {
+      await this.manualIntervention.promise;
+    }
+    while (true) {
+      const freeMemoryMb = availableMemoryMb();
+      const pageLimit = Math.max(1, Number(this.currentPageLimit || this.maxParallelism || 1));
+      const pageLimitReached = this.activeWorkerPages >= pageLimit;
+      const lowMemory = this.activeWorkerPages > 0
+        && this.minFreeMemoryMb > 0
+        && freeMemoryMb < this.minFreeMemoryMb;
+      const reserveRisk = this.activeWorkerPages > 0
+        && this.systemReserveMemoryMb > 0
+        && freeMemoryMb - this.pageMemoryMb < this.systemReserveMemoryMb;
+      if (!pageLimitReached && !lowMemory && !reserveRisk) {
+        break;
+      }
+      onWait(freeMemoryMb);
+      await delay(pageLimitReached ? 1000 : 2500);
+    }
+    this.activeWorkerPages += 1;
+    try {
+      const context = await this.launch(this.headless);
+      return await context.newPage();
+    } catch (error) {
+      this.activeWorkerPages = Math.max(0, this.activeWorkerPages - 1);
+      throw error;
+    }
+  }
+
+  async closeWorkerPage(page) {
+    if (!page) {
+      return;
+    }
+    await page.close().catch(() => {});
+    this.activeWorkerPages = Math.max(0, this.activeWorkerPages - 1);
+  }
+
+  effectiveParallelism(entriesCount) {
+    return adaptiveParallelismLimit({
+      requested: this.parallelism,
+      entriesCount,
+      totalMb: totalMemoryMb(),
+      freeMb: availableMemoryMb(),
+      cpuCount: os.cpus().length || 4,
+      maxParallelism: this.maxParallelism,
+      pageMemoryMb: this.pageMemoryMb,
+      systemReserveMemoryMb: this.systemReserveMemoryMb,
+      auto: this.parallelismAuto
+    });
+  }
+
   async processRows(rows, jobDir, onProgress = () => {}) {
-    const context = await this.launch();
-    const loginPage = await this.waitForLogin((status, message) => onProgress({ status, message }));
+    await this.launch(this.headless);
+    await this.ensureGeminiLogin((status, message) => onProgress({ status, message }));
     const unique = new Map();
     rows.forEach((row, index) => {
       const key = companyKey(row);
@@ -1424,61 +1786,53 @@ class GeminiPlaywrightAgent {
       return output;
     }
 
-    const parallelism = Math.min(this.parallelism, entries.length);
+    const requestedParallelism = Math.min(this.parallelism, entries.length);
+    const parallelism = this.effectiveParallelism(entries.length);
+    this.currentPageLimit = parallelism;
     let nextPosition = 0;
     let completed = 0;
+    const adaptiveMessage = this.parallelismAuto && parallelism < requestedParallelism
+      ? ` (adaptive safe limit from requested ${requestedParallelism})`
+      : "";
     onProgress({
       status: "running",
       processed: 0,
       total: entries.length,
       company: "",
-      message: `Starting ${parallelism} parallel Gemini tab${parallelism === 1 ? "" : "s"}`
+      message: `Starting ${parallelism} parallel Gemini tab${parallelism === 1 ? "" : "s"}${adaptiveMessage}`,
+      rows: output
     });
 
     const workers = Array.from({ length: parallelism }, async (_, workerIndex) => {
       if (workerIndex && this.workerStaggerMs) {
         await new Promise((resolve) => setTimeout(resolve, workerIndex * this.workerStaggerMs));
       }
-      const searchPage = await context.newPage();
-      const geminiPage = workerIndex === 0 && loginPage && !loginPage.isClosed()
-        ? loginPage
-        : await context.newPage();
-      try {
-        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-        while (true) {
-          const position = nextPosition;
-          nextPosition += 1;
-          if (position >= entries.length) {
-            break;
-          }
-          const result = await this.processEntry({
-            context,
-            searchPage,
-            geminiPage,
-            entry: entries[position],
-            position,
-            total: entries.length,
-            jobDir,
-            output,
-            workerIndex,
-            parallelism,
-            completedCount: () => completed,
-            onProgress
-          });
-          completed += 1;
-          onProgress({
-            status: "running",
-            processed: completed,
-            total: entries.length,
-            company: result.company,
-            message: workerMessage(workerIndex, parallelism, result.message)
-          });
+      while (true) {
+        const position = nextPosition;
+        nextPosition += 1;
+        if (position >= entries.length) {
+          break;
         }
-      } finally {
-        await searchPage.close().catch(() => {});
-        if (workerIndex !== 0) {
-          await geminiPage.close().catch(() => {});
-        }
+        const result = await this.processEntry({
+          entry: entries[position],
+          position,
+          total: entries.length,
+          jobDir,
+          output,
+          workerIndex,
+          parallelism,
+          completedCount: () => completed,
+          onProgress
+        });
+        completed += 1;
+        onProgress({
+          status: "running",
+          processed: completed,
+          total: entries.length,
+          company: result.company,
+          message: workerMessage(workerIndex, parallelism, result.message),
+          rows: output
+        });
       }
     });
 
@@ -1487,9 +1841,6 @@ class GeminiPlaywrightAgent {
   }
 
   async processEntry({
-    context,
-    searchPage,
-    geminiPage,
     entry,
     position,
     total,
@@ -1501,6 +1852,11 @@ class GeminiPlaywrightAgent {
     onProgress
   }) {
     const row = entry.row;
+    let observedInterventionSerial = this.interventionSerial;
+    let searchPage = null;
+    let geminiPage = null;
+    let organicResults = [];
+    let contactCandidates = [];
     const company = rowCompanyName(row);
     const queryUrl = googleQueryUrl(row);
     const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-google-results.json`);
@@ -1513,19 +1869,41 @@ class GeminiPlaywrightAgent {
     });
 
     try {
-      progress("Opening Google query");
-      await this.waitForGoogleSearchTurn((seconds) => {
-        progress(`Google cooldown ${seconds}s`);
-      });
-      await searchPage.goto(queryUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await dismissGoogleConsent(searchPage);
-      await searchPage.waitForTimeout(1800);
-      const captchaMessage = await googleCaptchaMessage(searchPage);
-      if (captchaMessage) {
-        this.noteGoogleCaptcha();
-        throw new Error(captchaMessage);
+      for (let searchAttempt = 0; searchAttempt < 2; searchAttempt += 1) {
+        progress(searchAttempt ? "Resuming Google query after CAPTCHA" : "Opening Google query");
+        await this.waitForGoogleSearchTurn((seconds) => {
+          progress(`Google cooldown ${seconds}s`);
+        });
+        searchPage = await this.newWorkerPage((freeMemoryMb) => {
+          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
+        });
+        await searchPage.goto(queryUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await dismissGoogleConsent(searchPage);
+        await searchPage.waitForTimeout(1800);
+        const captchaMessage = await googleCaptchaMessage(searchPage);
+        if (captchaMessage) {
+          const challengeUrl = searchPage.url() || queryUrl;
+          const challengePage = searchPage;
+          searchPage = null;
+          await this.waitForManualIntervention({
+            page: challengePage,
+            trackedPage: true,
+            kind: "captcha",
+            url: challengeUrl,
+            onStatus: (status, message) => onProgress({
+              status,
+              processed: completedCount(),
+              total,
+              company,
+              message: workerMessage(workerIndex, parallelism, message)
+            })
+          });
+          observedInterventionSerial = this.interventionSerial;
+          continue;
+        }
+        organicResults = await googleOrganicResults(searchPage, 15);
+        break;
       }
-      const organicResults = await googleOrganicResults(searchPage, 15);
       fs.writeFileSync(resultListPath, JSON.stringify({
         queryUrl,
         company,
@@ -1536,7 +1914,10 @@ class GeminiPlaywrightAgent {
         throw new Error("No non-sponsored Google organic results were extracted");
       }
       progress(`Checking organic result pages for visible contacts (${organicResults.length} links)`);
-      const contactCandidates = await collectContactCandidates(context, organicResults, () => {}, searchPage);
+      contactCandidates = await collectContactCandidates(this.context, organicResults, () => {}, searchPage);
+      if (this.interventionSerial > observedInterventionSerial) {
+        throw new Error("Browser context switched for manual CAPTCHA/login");
+      }
       fs.writeFileSync(resultListPath, JSON.stringify({
         queryUrl,
         company,
@@ -1546,27 +1927,81 @@ class GeminiPlaywrightAgent {
       }, null, 2));
       const firstOrganicUrl = organicResults[0].url;
 
-      await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
-      if (!await findPromptBox(geminiPage)) {
-        await this.waitForLogin((status, message) => onProgress({
-          status,
-          processed: completedCount(),
-          total,
-          company,
-          message: workerMessage(workerIndex, parallelism, message)
-        }));
-      }
+      await this.closeWorkerPage(searchPage);
+      searchPage = null;
+
+      const openReadyGeminiPage = async () => {
+        geminiPage = await this.newWorkerPage((freeMemoryMb) => {
+          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
+        });
+        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
+        if (await this.waitForPrompt(geminiPage, 15000)) {
+          return;
+        }
+        const loginPage = geminiPage;
+        geminiPage = null;
+        await this.waitForManualIntervention({
+          page: loginPage,
+          trackedPage: true,
+          kind: "login",
+          url: "https://gemini.google.com/app",
+          onStatus: (status, message) => onProgress({
+            status,
+            processed: completedCount(),
+            total,
+            company,
+            message: workerMessage(workerIndex, parallelism, message)
+          })
+        });
+        observedInterventionSerial = this.interventionSerial;
+        geminiPage = await this.newWorkerPage((freeMemoryMb) => {
+          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
+        });
+        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
+        if (!await this.waitForPrompt(geminiPage, 15000)) {
+          throw new Error("Gemini prompt was not available after manual login");
+        }
+      };
+
       const debugBasePath = path.join(jobDir, String(position + 1).padStart(5, "0"));
       const prompt = resultPrompt(row, queryUrl, organicResults, contactCandidates);
-      await fillPrompt(geminiPage, prompt);
-      progress(`Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`);
-      await sendPrompt(geminiPage, prompt, debugBasePath);
-      progress("Waiting for strict Gemini JSON");
-      const parsed = await waitForGeminiJson(
-        geminiPage,
-        this.timeoutMs,
-        debugBasePath
-      );
+      let parsed = null;
+      let lastGeminiJsonError = "";
+      let usedFallback = false;
+      const totalGeminiAttempts = this.geminiJsonRetries + 1;
+      for (let geminiAttempt = 0; geminiAttempt < totalGeminiAttempts; geminiAttempt += 1) {
+        if (geminiAttempt > 0) {
+          progress(`Gemini JSON not received; retrying ${geminiAttempt + 1}/${totalGeminiAttempts}`);
+          await this.closeWorkerPage(geminiPage);
+          geminiPage = null;
+        }
+        await openReadyGeminiPage();
+        await fillPrompt(geminiPage, prompt);
+        progress(geminiAttempt
+          ? `Retrying Gemini JSON request (${geminiAttempt + 1}/${totalGeminiAttempts})`
+          : `Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`);
+        const attemptDebugBasePath = geminiAttempt ? `${debugBasePath}-retry-${geminiAttempt}` : debugBasePath;
+        await sendPrompt(geminiPage, prompt, attemptDebugBasePath);
+        progress(geminiAttempt ? `Waiting for strict Gemini JSON retry ${geminiAttempt + 1}/${totalGeminiAttempts}` : "Waiting for strict Gemini JSON");
+        try {
+          parsed = await waitForGeminiJson(
+            geminiPage,
+            this.timeoutMs,
+            attemptDebugBasePath
+          );
+          break;
+        } catch (error) {
+          const retryMessage = cleanText(error?.message || error);
+          if (!isRetryableGeminiJsonError(retryMessage)) {
+            throw error;
+          }
+          lastGeminiJsonError = retryMessage;
+        }
+      }
+      if (!parsed) {
+        parsed = fallbackGeminiResult(row, firstOrganicUrl, lastGeminiJsonError);
+        usedFallback = true;
+      }
       const result = normalizedFirstResult(parsed, row, firstOrganicUrl);
       if (result.phone_number && shouldClearRejectedContact(result)) {
         result.phone_number = "";
@@ -1593,22 +2028,44 @@ class GeminiPlaywrightAgent {
       applyGeminiResult(output, entry, result, resultListPath);
       return {
         company: result.company_name || company,
-        message: "Gemini JSON received"
+        message: usedFallback
+          ? "Gemini empty JSON fallback saved after retries"
+          : "Gemini JSON received"
       };
     } catch (error) {
+      if (this.interventionSerial > observedInterventionSerial) {
+        searchPage = null;
+        geminiPage = null;
+        while (this.manualIntervention) {
+          await this.manualIntervention.promise;
+        }
+        progress("Retrying row after manual CAPTCHA/login");
+        return this.processEntry({
+          entry,
+          position,
+          total,
+          jobDir,
+          output,
+          workerIndex,
+          parallelism,
+          completedCount,
+          onProgress
+        });
+      }
       const message = cleanText(error?.message || error);
       applySkippedResult(output, entry, message);
       return {
         company,
         message: `Skipped: ${message}`
       };
+    } finally {
+      await this.closeWorkerPage(searchPage);
+      await this.closeWorkerPage(geminiPage);
     }
   }
 
   async close() {
-    await this.context?.close().catch(() => {});
-    this.context = null;
-    this.geminiPage = null;
+    await this.closeContext();
   }
 }
 
@@ -1620,5 +2077,12 @@ module.exports = {
   isGeminiResult,
   normalizedResult,
   normalizedFirstResult,
-  googleQueryUrl
+  googleQueryUrl,
+  isRetryableGeminiJsonError,
+  fallbackGeminiResult,
+  clearProfileCaches,
+  availableMemoryMb,
+  totalMemoryMb,
+  adaptiveParallelismLimit,
+  hardwareParallelismCap
 };

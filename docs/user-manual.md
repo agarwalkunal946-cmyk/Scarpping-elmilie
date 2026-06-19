@@ -21,6 +21,8 @@
 7. Use `Find Contacts` only if you want to rerun Gemini lookup.
 8. Export CSV or Excel.
 
+Normal processing runs headless after `npm run agent:login`. A visible Chrome window appears immediately when manual CAPTCHA/login action is detected and closes automatically after the challenge is solved; interrupted rows retry in the background. If `npm run agent` is stopped, the extension shows `OK` and keeps the latest saved partial rows exportable.
+
 ## AI Contact Rules
 
 - Website Name is the Consignee name from Power BI.
@@ -33,7 +35,7 @@
 
 ## Gemini Website
 
-The automation uses the model currently selected by the signed-in Gemini website. It runs multiple Gemini tabs in parallel by default. Model availability, limits, and results depend on that Gemini account.
+The automation uses the model currently selected by the signed-in Gemini website. It runs multiple headless Gemini pages in parallel by default. Model availability, limits, and results depend on that Gemini account.
 
 ## Final Columns
 

@@ -34,7 +34,13 @@ For normal use, start the companion agent and leave it running:
 npm run agent
 ```
 
-The agent opens up to 15 Gemini tabs in parallel by default. To reduce load or increase speed, set `GEMINI_PARALLELISM` from `1` to `15` before starting the agent.
+Normal agent processing is headless, so no Chrome window remains open. When Google requires CAPTCHA or Gemini requires login, current headless pages close and one visible Chrome window opens immediately instead of waiting for active rows. Complete the manual action; the window closes, interrupted rows retry, and headless processing resumes automatically.
+
+Stopping the agent preserves its latest row snapshot. The extension ends the loader, shows badge `OK`, and keeps those partial rows available for export. Restarting the agent does not silently leave an old job in a running state.
+
+The agent runs up to 15 workers in parallel by default. A worker keeps only one heavy Google/contact or Gemini page open at a time and closes it after each row. When free system memory drops below the safety reserve, new pages wait while running rows finish and release memory; all queued rows then continue automatically. Heavy images/media/fonts are skipped, disposable profile caches are cleared at launch without removing login cookies, Chrome's disk cache is capped, and old job artifacts are pruned. The same safeguards apply on macOS and Windows.
+
+Optional `.env` controls are `GEMINI_HEADLESS=true|false` (default `true`), `GEMINI_PARALLELISM=1..15`, `GEMINI_MIN_FREE_MEMORY_MB` (default `2048`), `GEMINI_DISK_CACHE_MB=32..1024`, `GEMINI_BLOCK_HEAVY_RESOURCES=true|false`, `AGENT_ARTIFACT_RETENTION_DAYS`, and `AGENT_ARTIFACT_MAX_JOBS`.
 
 The extension Settings page can open the Gemini login window only while the local agent is running.
 

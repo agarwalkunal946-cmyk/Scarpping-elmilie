@@ -23,7 +23,10 @@ The CSV and Excel files contain exactly:
 7. Reopen the popup after the badge changes to `OK`, then export CSV or Excel.
 
 No Gemini API key is used. The agent automates the normal Gemini website in a persistent local Chrome profile.
-By default it processes up to 15 unique-company Gemini lookups in parallel. Set `GEMINI_PARALLELISM=1..15` before `npm run agent` to tune speed versus account/browser limits.
+After the one-time visible `npm run agent:login`, normal `npm run agent` processing is headless. If Google shows a CAPTCHA or Gemini needs login again, headless pages close immediately and one visible Chrome window opens without waiting for other rows. Once solved, that window closes, interrupted rows retry, and background processing resumes automatically.
+If the agent is stopped, every row snapshot received so far remains available for CSV/Excel export; the loader stops and the badge shows `OK` for the saved partial result.
+Gemini waits up to 30 seconds for strict JSON per attempt. If JSON does not arrive, the agent resends the same request in a fresh Gemini page up to `GEMINI_JSON_RETRIES=2`; if Gemini still gives no strict JSON, the row is saved with an empty JSON-style result instead of a skipped label.
+By default the agent requests up to 15 unique-company Gemini lookups, then auto-sizes the real worker count for the current Mac/Windows RAM and CPU so low-memory devices stay usable. Use one persistent Chrome profile instead of many Chrome processes; each worker keeps only one heavy page open at a time, closes it after every row, waits when free system memory is low, blocks images/media/fonts/styles in headless mode, caps Chrome disk cache, and prunes old job artifacts automatically. Set `GEMINI_PARALLELISM=1..30` to request more or fewer workers; keep `GEMINI_PARALLELISM_AUTO=true` for the smooth safe limit.
 
 ## Accuracy Rules
 

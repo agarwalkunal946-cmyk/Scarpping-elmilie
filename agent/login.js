@@ -5,7 +5,7 @@ loadEnv(path.resolve(process.cwd(), ".env"));
 
 (async () => {
   const agent = new GeminiPlaywrightAgent();
-  const page = await agent.openLogin();
+  const page = await agent.openLogin({ visible: true });
   console.log("Gemini opened in a persistent Playwright Chrome profile.");
   console.log("Complete login and wait until the Gemini prompt box is visible.");
   console.log("This command will save the profile and close automatically.");
@@ -14,7 +14,7 @@ loadEnv(path.resolve(process.cwd(), ".env"));
     if (status === "waiting_login") {
       process.stdout.write(`\r${message}   `);
     }
-  });
+  }, page);
   console.log("\nGemini login confirmed. Saving profile...");
   await page.waitForTimeout(1500);
   await agent.close();

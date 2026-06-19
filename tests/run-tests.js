@@ -3,12 +3,19 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const {
+  GeminiPlaywrightAgent,
   parseJsonObject,
   parseJsonObjects,
   isGeminiResult,
   normalizedResult,
   normalizedFirstResult,
-  googleQueryUrl
+  googleQueryUrl,
+  isRetryableGeminiJsonError,
+  fallbackGeminiResult,
+  clearProfileCaches,
+  availableMemoryMb,
+  adaptiveParallelismLimit,
+  hardwareParallelismCap
 } = require("../agent/gemini-playwright");
 
 const root = path.resolve(__dirname, "..");
@@ -33,6 +40,77 @@ vm.runInContext(fs.readFileSync(path.join(root, "src/lib/processor.js"), "utf8")
 vm.runInContext(fs.readFileSync(path.join(root, "src/lib/exporters.js"), "utf8"), sandbox);
 
 async function main() {
+  const interventionAgent = new GeminiPlaywrightAgent();
+  const launchModes = [];
+  const interventionStatuses = [];
+  let initialContextClosed = false;
+  const workerPage = { async close() {} };
+  const visiblePage = {
+    isClosed() { return false; },
+    url() { return "https://www.google.com/search?q=completed"; },
+    locator() { return { innerText: async () => "Google Search Results" }; },
+    async goto() {},
+    async bringToFront() {},
+    async waitForTimeout() {},
+    async close() {}
+  };
+  const headedContext = {
+    pages() { return [visiblePage]; },
+    async close() {}
+  };
+  const backgroundContext = {
+    pages() { return []; },
+    async close() {}
+  };
+  interventionAgent.context = {
+    async close() { initialContextClosed = true; }
+  };
+  interventionAgent.contextHeadless = true;
+  interventionAgent.activeWorkerPages = 9;
+  interventionAgent.launch = async (headless) => {
+    launchModes.push(headless);
+    const context = headless ? backgroundContext : headedContext;
+    interventionAgent.context = context;
+    interventionAgent.contextHeadless = headless;
+    return context;
+  };
+  await interventionAgent.waitForManualIntervention({
+    page: workerPage,
+    trackedPage: true,
+    kind: "captcha",
+    url: "https://www.google.com/sorry/index",
+    onStatus(status, message) {
+      interventionStatuses.push({ status, message });
+    }
+  });
+  assert.equal(initialContextClosed, true);
+  assert.deepEqual(launchModes, [false, true]);
+  assert.equal(interventionAgent.activeWorkerPages, 0);
+  assert.equal(interventionAgent.interventionSerial, 1);
+  assert.equal(interventionStatuses[0].status, "waiting_captcha");
+  assert.match(interventionStatuses[0].message, /Opening Chrome now/);
+  assert.doesNotMatch(interventionStatuses.map((item) => item.message).join(" "), /Pausing \d+ active/);
+
+  assert.ok(availableMemoryMb() > 0);
+  const cacheFixture = path.join("/private/tmp", `gemini-profile-cache-test-${process.pid}`);
+  fs.mkdirSync(path.join(cacheFixture, "Default", "Cache"), { recursive: true });
+  fs.mkdirSync(path.join(cacheFixture, "Default", "Service Worker", "CacheStorage"), { recursive: true });
+  fs.writeFileSync(path.join(cacheFixture, "Default", "Cache", "data"), "cache");
+  fs.writeFileSync(path.join(cacheFixture, "Default", "Cookies"), "keep-login");
+  clearProfileCaches(cacheFixture);
+  assert.equal(fs.existsSync(path.join(cacheFixture, "Default", "Cache")), false);
+  assert.equal(fs.existsSync(path.join(cacheFixture, "Default", "Service Worker", "CacheStorage")), false);
+  assert.equal(fs.readFileSync(path.join(cacheFixture, "Default", "Cookies"), "utf8"), "keep-login");
+  fs.rmSync(cacheFixture, { recursive: true, force: true });
+
+  const lockedCacheFixture = path.join("/private/tmp", `gemini-profile-locked-test-${process.pid}`);
+  fs.mkdirSync(path.join(lockedCacheFixture, "Default", "Cache"), { recursive: true });
+  fs.writeFileSync(path.join(lockedCacheFixture, "Default", "Cache", "data"), "active-cache");
+  fs.writeFileSync(path.join(lockedCacheFixture, "SingletonLock"), "locked");
+  clearProfileCaches(lockedCacheFixture);
+  assert.equal(fs.readFileSync(path.join(lockedCacheFixture, "Default", "Cache", "data"), "utf8"), "active-cache");
+  fs.rmSync(lockedCacheFixture, { recursive: true, force: true });
+
   const rawRows = [
     {
       hsCode: "08013220",
@@ -247,6 +325,50 @@ async function main() {
   assert.equal(firstResultContact.source_url, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/");
   assert.equal(firstResultContact.email, "sales@volza.com");
   assert.equal(firstResultContact.phone_number, "+971 4 555 0123");
+  assert.equal(isRetryableGeminiJsonError("Gemini JSON response timed out"), true);
+  assert.equal(isRetryableGeminiJsonError("Gemini limit reached or rate limited"), false);
+  const emptyFallback = normalizedFirstResult(
+    fallbackGeminiResult(agentRow, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/", "Gemini JSON response timed out"),
+    agentRow,
+    "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/"
+  );
+  assert.equal(emptyFallback.company_name, "RARR Nuts Trading LLC");
+  assert.equal(emptyFallback.website_url, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/");
+  assert.equal(emptyFallback.email, "");
+  assert.equal(emptyFallback.phone_number, "");
+  assert.match(emptyFallback.notes, /Empty JSON fallback after Gemini retry/);
+  assert.equal(hardwareParallelismCap(4096, 4), 2);
+  assert.equal(hardwareParallelismCap(8192, 8), 3);
+  assert.equal(adaptiveParallelismLimit({
+    requested: 30,
+    entriesCount: 100,
+    totalMb: 4096,
+    freeMb: 1800,
+    cpuCount: 4,
+    maxParallelism: 10,
+    pageMemoryMb: 700,
+    systemReserveMemoryMb: 1536
+  }), 1);
+  assert.equal(adaptiveParallelismLimit({
+    requested: 15,
+    entriesCount: 100,
+    totalMb: 8192,
+    freeMb: 4096,
+    cpuCount: 8,
+    maxParallelism: 10,
+    pageMemoryMb: 700,
+    systemReserveMemoryMb: 1536
+  }), 3);
+  assert.equal(adaptiveParallelismLimit({
+    requested: 30,
+    entriesCount: 100,
+    totalMb: 32768,
+    freeMb: 20000,
+    cpuCount: 12,
+    maxParallelism: 10,
+    pageMemoryMb: 700,
+    systemReserveMemoryMb: 1536
+  }), 8);
 
   processed.rows[0].websiteUrl = "https://rabelink.nl/";
   processed.rows[0].email = "info@rabelink.nl";

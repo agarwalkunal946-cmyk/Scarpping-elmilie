@@ -14,9 +14,64 @@ const jobs = new Map();
 const queue = [];
 const agent = new GeminiPlaywrightAgent();
 let active = false;
+let currentJob = null;
+let shutdownStarted = false;
 
 fs.mkdirSync(jobsDir, { recursive: true });
 fs.mkdirSync(screenshotsDir, { recursive: true });
+
+const artifactRetentionDays = Math.max(1, Math.floor(Number(process.env.AGENT_ARTIFACT_RETENTION_DAYS) || 7));
+const artifactMaxJobs = Math.max(5, Math.floor(Number(process.env.AGENT_ARTIFACT_MAX_JOBS) || 20));
+
+function cleanupArtifacts(protectedIds = new Set()) {
+  const expiry = Date.now() - artifactRetentionDays * 24 * 60 * 60 * 1000;
+  const records = fs.readdirSync(jobsDir)
+    .filter((name) => /^[a-f0-9-]+\.json$/i.test(name))
+    .map((name) => {
+      const filePath = path.join(jobsDir, name);
+      return { id: path.basename(name, ".json"), filePath, modifiedAt: fs.statSync(filePath).mtimeMs };
+    })
+    .sort((left, right) => right.modifiedAt - left.modifiedAt);
+  records.forEach((record, index) => {
+    if (protectedIds.has(record.id) || (index < artifactMaxJobs && record.modifiedAt >= expiry)) {
+      return;
+    }
+    fs.rmSync(record.filePath, { force: true });
+    fs.rmSync(path.join(screenshotsDir, record.id), { recursive: true, force: true });
+    jobs.delete(record.id);
+  });
+  const recordIds = new Set(records.map((record) => record.id));
+  for (const entry of fs.readdirSync(screenshotsDir, { withFileTypes: true })) {
+    if (entry.isDirectory() && !recordIds.has(entry.name) && !protectedIds.has(entry.name)) {
+      fs.rmSync(path.join(screenshotsDir, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+cleanupArtifacts();
+
+function recoverInterruptedJobs() {
+  for (const name of fs.readdirSync(jobsDir).filter((value) => /^[a-f0-9-]+\.json$/i.test(value))) {
+    const filePath = path.join(jobsDir, name);
+    try {
+      const job = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (!["queued", "running", "waiting_login", "waiting_captcha"].includes(job.status)) {
+        continue;
+      }
+      job.rows = Array.isArray(job.rows) ? job.rows : (Array.isArray(job.inputRows) ? job.inputRows : []);
+      job.status = "partial";
+      job.message = `Agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results; saved rows are available.`;
+      job.error = "";
+      job.updatedAt = new Date().toISOString();
+      delete job.inputRows;
+      fs.writeFileSync(filePath, JSON.stringify(job, null, 2));
+    } catch (error) {
+      // Ignore corrupt historical job files; normal cleanup can remove them later.
+    }
+  }
+}
+
+recoverInterruptedJobs();
 
 function send(res, status, body) {
   const payload = JSON.stringify(body);
@@ -45,7 +100,7 @@ function publicJob(job) {
     company: job.company,
     message: job.message,
     error: job.error,
-    rows: job.status === "completed" ? job.rows : undefined
+    rows: Array.isArray(job.rows) ? job.rows : undefined
   };
 }
 
@@ -84,14 +139,19 @@ async function runQueue() {
   }
   active = true;
   const job = queue.shift();
+  currentJob = job;
   job.status = "running";
   job.updatedAt = new Date().toISOString();
   persist(job);
   const jobScreenshots = path.join(screenshotsDir, job.id);
   fs.mkdirSync(jobScreenshots, { recursive: true });
   try {
-    job.rows = await agent.processRows(job.inputRows, jobScreenshots, (progress) => {
-      job.status = progress.status || "running";
+    const inputRows = job.inputRows;
+    const processing = agent.processRows(inputRows, jobScreenshots, (progress) => {
+      const manualKind = agent.manualIntervention?.kind;
+      job.status = manualKind
+        ? (manualKind === "captcha" ? "waiting_captcha" : "waiting_login")
+        : (progress.status || "running");
       const nextProcessed = Number(progress.processed);
       const nextTotal = Number(progress.total);
       if (Number.isFinite(nextProcessed)) {
@@ -101,21 +161,32 @@ async function runQueue() {
         job.total = nextTotal;
       }
       job.company = progress.company || "";
-      job.message = progress.message || "";
+      if (!manualKind || ["waiting_captcha", "waiting_login"].includes(progress.status)) {
+        job.message = progress.message || "";
+      }
+      if (Array.isArray(progress.rows)) {
+        job.rows = progress.rows;
+      }
       job.updatedAt = new Date().toISOString();
       persist(job);
     });
+    delete job.inputRows;
+    job.rows = await processing;
     job.status = "completed";
     job.processed = job.total;
     job.message = "All Gemini results completed";
   } catch (error) {
-    job.status = "failed";
-    job.error = error?.message || String(error);
-    job.message = "Gemini Playwright job failed";
+    job.status = Number(job.processed || 0) > 0 ? "partial" : "failed";
+    job.error = job.status === "failed" ? (error?.message || String(error)) : "";
+    job.message = job.status === "partial"
+      ? `Agent stopped after ${job.processed}/${job.total} results; saved rows are available.`
+      : "Gemini Playwright job failed";
   }
   job.updatedAt = new Date().toISOString();
   delete job.inputRows;
   persist(job);
+  cleanupArtifacts(new Set(queue.map((queuedJob) => queuedJob.id)));
+  currentJob = null;
   active = false;
   setImmediate(runQueue);
 }
@@ -145,7 +216,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/auth/open") {
-      await agent.openLogin();
+      await agent.openLogin({ visible: true });
       send(res, 200, { ok: true, message: "Gemini login window opened" });
       return;
     }
@@ -166,6 +237,7 @@ const server = http.createServer(async (req, res) => {
         company: "",
         message: "Queued",
         error: "",
+        rows: body.rows.map((row) => ({ ...row })),
         inputRows: body.rows
       };
       jobs.set(id, job);
@@ -218,7 +290,21 @@ server.on("error", async (error) => {
   process.exit(1);
 });
 
-process.on("SIGINT", async () => {
+async function shutdown() {
+  if (shutdownStarted) {
+    return;
+  }
+  shutdownStarted = true;
+  if (currentJob) {
+    currentJob.status = "partial";
+    currentJob.message = `Agent stopped after ${Number(currentJob.processed || 0)}/${Number(currentJob.total || 0)} results; saved rows are available.`;
+    currentJob.error = "";
+    currentJob.updatedAt = new Date().toISOString();
+    persist(currentJob);
+  }
   await agent.close();
   server.close(() => process.exit(0));
-});
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const POLL_ALARM = "exim-playwright-job";
+const TERMINAL_JOB_STATUSES = ["completed", "partial", "failed"];
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(["settings", "installedAt"]);
@@ -129,22 +130,27 @@ async function pollStoredJob() {
   if (!current?.id) {
     return current || null;
   }
-  if (["completed", "failed"].includes(current.status)) {
+  if (TERMINAL_JOB_STATUSES.includes(current.status)) {
+    if (["completed", "partial"].includes(current.status)) {
+      await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
+      await chrome.action.setBadgeText({ text: "OK" });
+    }
     return current;
   }
   let job;
   try {
     job = await agentRequest(`/jobs/${encodeURIComponent(current.id)}`);
   } catch (error) {
-    return markStoredJobFailed(current, error?.message || String(error));
+    return markStoredJobPartial(current, error?.message || String(error));
   }
   const metadata = jobMetadata(job);
-  await chrome.storage.local.set({ latestAgentJob: metadata });
-  if (job.status === "completed" && Array.isArray(job.rows)) {
-    await chrome.storage.local.set({
-      latestRows: job.rows,
-      latestSchemaVersion: DEFAULT_SETTINGS.exportSchemaVersion
-    });
+  const storageUpdate = { latestAgentJob: metadata };
+  if (Array.isArray(job.rows)) {
+    storageUpdate.latestRows = job.rows;
+    storageUpdate.latestSchemaVersion = DEFAULT_SETTINGS.exportSchemaVersion;
+  }
+  await chrome.storage.local.set(storageUpdate);
+  if (["completed", "partial"].includes(job.status)) {
     await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
     await chrome.action.setBadgeText({ text: "OK" });
     await chrome.alarms.clear(POLL_ALARM);
@@ -154,24 +160,25 @@ async function pollStoredJob() {
     await chrome.alarms.clear(POLL_ALARM);
   } else {
     await chrome.action.setBadgeBackgroundColor({ color: "#0b7fab" });
-    await chrome.action.setBadgeText({ text: job.status === "waiting_login" ? "IN" : "AI" });
+    await chrome.action.setBadgeText({ text: ["waiting_login", "waiting_captcha"].includes(job.status) ? "IN" : "AI" });
   }
   return metadata;
 }
 
-async function markStoredJobFailed(job, message) {
-  const failed = {
+async function markStoredJobPartial(job, message) {
+  const partial = {
     ...job,
-    status: "failed",
+    status: "partial",
     updatedAt: new Date().toISOString(),
-    error: message,
-    message: "Playwright agent stopped before the job finished"
+    error: "",
+    message: `Playwright agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results. Showing saved data.`,
+    stopReason: message
   };
-  await chrome.storage.local.set({ latestAgentJob: failed });
-  await chrome.action.setBadgeBackgroundColor({ color: "#b42318" });
-  await chrome.action.setBadgeText({ text: "!" });
+  await chrome.storage.local.set({ latestAgentJob: partial });
+  await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
+  await chrome.action.setBadgeText({ text: "OK" });
   await chrome.alarms.clear(POLL_ALARM);
-  return failed;
+  return partial;
 }
 
 function jobMetadata(job) {

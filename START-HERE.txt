@@ -1,4 +1,4 @@
-EXIM Elite Contact Exporter v1.7.3
+EXIM Elite Contact Exporter v1.7.9
 
 1. Open Terminal in this folder.
 2. Run: npm install
@@ -20,12 +20,25 @@ OK = complete
 The popup may close when you switch tabs. The local agent continues in the
 background; reopen the extension popup to see progress and export Excel.
 
+After the one-time visible npm run agent:login step, npm run agent processes in
+headless background mode. Chrome opens immediately when manual CAPTCHA/login
+action is needed; interrupted rows retry after it returns to headless mode. If the agent is
+stopped, the last saved partial rows remain exportable and the badge changes to OK.
+If Gemini does not return strict JSON within 30 seconds, the same request is
+retried in a fresh Gemini page. After the configured retries, the row is saved as
+empty JSON output instead of a skipped row.
+
 Mac and Windows use the same npm commands. The agent handles Command+V on
 macOS and Control+V on Windows/Linux internally.
 
 Every contact lookup uses the report's captured hover Google query URL first.
 The agent extracts Google organic links and visible contact candidates as text,
-then sends a strict JSON prompt to Gemini. It runs up to 15 Gemini tabs in
-parallel by default. To tune it, run the agent with GEMINI_PARALLELISM=1..15.
+then sends a strict JSON prompt to Gemini. It requests up to 15 Gemini workers
+by default, then auto-sizes the real parallel count for the current RAM/CPU so
+low devices stay smooth. Each worker keeps only one heavy page at a time, closes
+it after every row, waits when free RAM is low, caps browser cache, and prunes
+old job files on Mac and Windows. Waiting rows continue automatically.
+To tune it, run the agent with GEMINI_PARALLELISM=1..30 and keep
+GEMINI_PARALLELISM_AUTO=true for the smooth safe limit.
 
 No Gemini API key is required. Do not put account passwords in this folder.

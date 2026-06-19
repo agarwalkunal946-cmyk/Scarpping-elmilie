@@ -1,12 +1,12 @@
 {
   "name": "exim-elite-report-exporter",
-  "version": "1.7.3",
+  "version": "1.7.9",
   "private": true,
   "description": "EXIM Elite contact exporter with a persistent local Playwright and Gemini web agent.",
   "scripts": {
     "agent": "node agent/server.js",
     "agent:login": "node agent/login.js",
-    "test": "node tests/run-tests.js && python3 tests/validate_xlsx.py && node --check agent/gemini-playwright.js && node --check agent/server.js && node --check agent/login.js && node --check src/content/extractor.js && node --check src/content/powerbi-capture-main.js && node --check src/lib/powerbi-dsr.js && node --check src/lib/processor.js && node --check src/lib/exporters.js && node --check src/popup/popup.js && node --check src/options/options.js && node --check src/background/service-worker.js"
+    "test": "node tests/run-tests.js && node tests/service-worker-tests.js && node tests/server-recovery-tests.js && python3 tests/validate_xlsx.py && node --check agent/gemini-playwright.js && node --check agent/server.js && node --check agent/login.js && node --check src/content/extractor.js && node --check src/content/powerbi-capture-main.js && node --check src/lib/powerbi-dsr.js && node --check src/lib/processor.js && node --check src/lib/exporters.js && node --check src/popup/popup.js && node --check src/options/options.js && node --check src/background/service-worker.js"
   },
   "license": "UNLICENSED",
   "dependencies": {
