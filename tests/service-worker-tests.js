@@ -127,6 +127,7 @@ function send(message) {
   assert.equal(badgeColor, "#16815d");
   assert.equal(alarmCleared, true);
   assert.equal(storageState.latestRows[0].websiteName, "Fresh snapshot");
+  assert.equal(partialJob.rows[0].websiteName, "Fresh snapshot");
   assert.match(partialJob.message, /55\/102/);
 
   console.log("Service worker partial-job tests passed");

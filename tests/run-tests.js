@@ -336,7 +336,7 @@ async function main() {
   assert.equal(emptyFallback.website_url, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/");
   assert.equal(emptyFallback.email, "");
   assert.equal(emptyFallback.phone_number, "");
-  assert.match(emptyFallback.notes, /Empty JSON fallback after Gemini retry/);
+  assert.match(emptyFallback.notes, /Empty JSON fallback after Gemini timeout/);
   assert.equal(hardwareParallelismCap(4096, 4), 2);
   assert.equal(hardwareParallelismCap(8192, 8), 3);
   assert.equal(adaptiveParallelismLimit({

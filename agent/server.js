@@ -104,6 +104,20 @@ function publicJob(job) {
   };
 }
 
+function stoppedMessage(job) {
+  return `Agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results; saved rows are available.`;
+}
+
+function markJobPartial(job, message = stoppedMessage(job)) {
+  job.stopRequested = true;
+  job.status = "partial";
+  job.error = "";
+  job.message = message;
+  job.updatedAt = new Date().toISOString();
+  delete job.inputRows;
+  persist(job);
+}
+
 function checkExistingAgent() {
   return new Promise((resolve) => {
     const req = http.request({
@@ -148,6 +162,9 @@ async function runQueue() {
   try {
     const inputRows = job.inputRows;
     const processing = agent.processRows(inputRows, jobScreenshots, (progress) => {
+      if (shutdownStarted || job.stopRequested) {
+        return;
+      }
       const manualKind = agent.manualIntervention?.kind;
       job.status = manualKind
         ? (manualKind === "captcha" ? "waiting_captcha" : "waiting_login")
@@ -171,16 +188,22 @@ async function runQueue() {
       persist(job);
     });
     delete job.inputRows;
-    job.rows = await processing;
-    job.status = "completed";
-    job.processed = job.total;
-    job.message = "All Gemini results completed";
+    const finalRows = await processing;
+    if (shutdownStarted || job.stopRequested) {
+      job.rows = Array.isArray(job.rows) ? job.rows : finalRows;
+      job.status = "partial";
+      job.error = "";
+      job.message = stoppedMessage(job);
+    } else {
+      job.rows = finalRows;
+      job.status = "completed";
+      job.processed = job.total;
+      job.message = "All Gemini results completed";
+    }
   } catch (error) {
-    job.status = Number(job.processed || 0) > 0 ? "partial" : "failed";
+    job.status = (shutdownStarted || job.stopRequested || Number(job.processed || 0) > 0) ? "partial" : "failed";
     job.error = job.status === "failed" ? (error?.message || String(error)) : "";
-    job.message = job.status === "partial"
-      ? `Agent stopped after ${job.processed}/${job.total} results; saved rows are available.`
-      : "Gemini Playwright job failed";
+    job.message = job.status === "partial" ? stoppedMessage(job) : "Gemini Playwright job failed";
   }
   job.updatedAt = new Date().toISOString();
   delete job.inputRows;
@@ -296,11 +319,7 @@ async function shutdown() {
   }
   shutdownStarted = true;
   if (currentJob) {
-    currentJob.status = "partial";
-    currentJob.message = `Agent stopped after ${Number(currentJob.processed || 0)}/${Number(currentJob.total || 0)} results; saved rows are available.`;
-    currentJob.error = "";
-    currentJob.updatedAt = new Date().toISOString();
-    persist(currentJob);
+    markJobPartial(currentJob);
   }
   await agent.close();
   server.close(() => process.exit(0));

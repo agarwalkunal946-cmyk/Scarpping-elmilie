@@ -166,6 +166,7 @@ async function pollStoredJob() {
 }
 
 async function markStoredJobPartial(job, message) {
+  const stored = await chrome.storage.local.get(["latestRows"]);
   const partial = {
     ...job,
     status: "partial",
@@ -174,11 +175,15 @@ async function markStoredJobPartial(job, message) {
     message: `Playwright agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results. Showing saved data.`,
     stopReason: message
   };
-  await chrome.storage.local.set({ latestAgentJob: partial });
+  const update = { latestAgentJob: partial };
+  if (Array.isArray(stored.latestRows)) {
+    update.latestRows = stored.latestRows;
+  }
+  await chrome.storage.local.set(update);
   await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
   await chrome.action.setBadgeText({ text: "OK" });
   await chrome.alarms.clear(POLL_ALARM);
-  return partial;
+  return Array.isArray(stored.latestRows) ? { ...partial, rows: stored.latestRows } : partial;
 }
 
 function jobMetadata(job) {

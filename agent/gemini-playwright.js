@@ -369,6 +369,21 @@ function resultPrompt(row, queryUrl, organicResults = [], contactCandidates = []
   const country = cleanText(row.country);
   const firstOrganicUrl = organicResults[0]?.url || "";
   return [
+    "CRITICAL OUTPUT CONTRACT:",
+    "Return exactly one raw JSON object and nothing else.",
+    "Do not use markdown, code fences, bullets, headings, explanations, apologies, tables, or surrounding text.",
+    "The first character of your response must be { and the last character must be }.",
+    "The JSON must parse with JSON.parse without cleanup.",
+    "Use double quotes for every key and string value.",
+    "Do not add extra keys. Do not omit any key.",
+    "Required exact keys in this exact order: company_name, website_url, phone_number, email, source_url, confidence, notes.",
+    "If a value is unavailable, use an empty string. Never use null, undefined, N/A, none, unknown, arrays, or nested objects.",
+    "confidence must be a number from 0 to 1.",
+    "notes must always be a short non-empty string explaining the Rank 1 source checked, even when email and phone are blank.",
+    "If you cannot access/check the page, still return the valid JSON object with blanks and a notes reason.",
+    "Valid empty-contact example:",
+    '{"company_name":"Example Company","website_url":"https://example.com/","phone_number":"","email":"","source_url":"https://example.com/","confidence":0,"notes":"Rank 1 checked; no visible same-company email or phone found."}',
+    "",
     "The Google organic search results below were extracted from the exact trade-report query URL.",
     "Use the Google query URL and the extracted results exactly. Do not rebuild a new search from other columns.",
     "Your job is to extract contact data from Rank 1, the FIRST non-sponsored organic result in the list.",
@@ -386,8 +401,8 @@ function resultPrompt(row, queryUrl, organicResults = [], contactCandidates = []
     "Do not invent a phone/email and never complete a masked or partially hidden number.",
     "If no full same-company email or phone is visible in Rank 1 or the contact candidates, use an empty string for that field.",
     "Always set company_name to the Company value, even when every contact field is blank.",
-    "The notes field must briefly say which first result URL was used and which source provided each contact field.",
-    "Return ONLY one JSON object with exactly these keys:",
+    "The notes field must briefly say which first result URL was used and which source provided each contact field, or why contact fields are blank.",
+    "FINAL RESPONSE FORMAT: Return ONLY one JSON object with exactly these keys:",
     '{"company_name":"","website_url":"","phone_number":"","email":"","source_url":"","confidence":0,"notes":""}',
     `Company: ${company}`,
     `Country: ${country}`,
@@ -1374,7 +1389,7 @@ function adaptiveParallelismLimit({
   totalMb = totalMemoryMb(),
   freeMb = availableMemoryMb(),
   cpuCount = os.cpus().length || 4,
-  maxParallelism = 10,
+  maxParallelism = 15,
   pageMemoryMb = 700,
   systemReserveMemoryMb = defaultSystemReserveMemoryMb(totalMb),
   auto = true
@@ -1469,7 +1484,7 @@ function fallbackGeminiResult(row, sourceUrl, reason) {
     email: "",
     source_url: url,
     confidence: 0,
-    notes: cleanText(`Empty JSON fallback after Gemini retry: ${reason || "no strict JSON returned"}`)
+    notes: cleanText(`Empty JSON fallback after Gemini timeout: ${reason || "no strict JSON returned"}`)
   };
 }
 
@@ -1479,10 +1494,10 @@ class GeminiPlaywrightAgent {
     this.profileDir = path.resolve(process.cwd(), process.env.GEMINI_PROFILE_DIR || "agent-data/gemini-profile");
     this.headless = booleanEnv("GEMINI_HEADLESS", true);
     this.timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 30000);
-    this.geminiJsonRetries = numericEnv("GEMINI_JSON_RETRIES", 2, 0, 5);
+    this.geminiJsonRetries = 0;
     this.parallelism = numericEnv("GEMINI_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
-    this.parallelismAuto = booleanEnv("GEMINI_PARALLELISM_AUTO", true);
-    this.maxParallelism = numericEnv("GEMINI_MAX_PARALLELISM", 10, 1, 30);
+    this.parallelismAuto = booleanEnv("GEMINI_PARALLELISM_AUTO", false);
+    this.maxParallelism = numericEnv("GEMINI_MAX_PARALLELISM", 15, 1, 30);
     this.pageMemoryMb = numericEnv("GEMINI_PAGE_MEMORY_MB", 700, 256, 4096);
     this.systemReserveMemoryMb = numericEnv("GEMINI_SYSTEM_RESERVE_MEMORY_MB", defaultSystemReserveMemoryMb(), 512, 32768);
     this.diskCacheMb = numericEnv("GEMINI_DISK_CACHE_MB", 128, 32, 1024);
@@ -1966,40 +1981,24 @@ class GeminiPlaywrightAgent {
       const debugBasePath = path.join(jobDir, String(position + 1).padStart(5, "0"));
       const prompt = resultPrompt(row, queryUrl, organicResults, contactCandidates);
       let parsed = null;
-      let lastGeminiJsonError = "";
       let usedFallback = false;
-      const totalGeminiAttempts = this.geminiJsonRetries + 1;
-      for (let geminiAttempt = 0; geminiAttempt < totalGeminiAttempts; geminiAttempt += 1) {
-        if (geminiAttempt > 0) {
-          progress(`Gemini JSON not received; retrying ${geminiAttempt + 1}/${totalGeminiAttempts}`);
-          await this.closeWorkerPage(geminiPage);
-          geminiPage = null;
+      await openReadyGeminiPage();
+      await fillPrompt(geminiPage, prompt);
+      progress(`Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`);
+      await sendPrompt(geminiPage, prompt, debugBasePath);
+      progress("Waiting up to 30 seconds for strict Gemini JSON");
+      try {
+        parsed = await waitForGeminiJson(
+          geminiPage,
+          this.timeoutMs,
+          debugBasePath
+        );
+      } catch (error) {
+        const message = cleanText(error?.message || error);
+        if (!isRetryableGeminiJsonError(message)) {
+          throw error;
         }
-        await openReadyGeminiPage();
-        await fillPrompt(geminiPage, prompt);
-        progress(geminiAttempt
-          ? `Retrying Gemini JSON request (${geminiAttempt + 1}/${totalGeminiAttempts})`
-          : `Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`);
-        const attemptDebugBasePath = geminiAttempt ? `${debugBasePath}-retry-${geminiAttempt}` : debugBasePath;
-        await sendPrompt(geminiPage, prompt, attemptDebugBasePath);
-        progress(geminiAttempt ? `Waiting for strict Gemini JSON retry ${geminiAttempt + 1}/${totalGeminiAttempts}` : "Waiting for strict Gemini JSON");
-        try {
-          parsed = await waitForGeminiJson(
-            geminiPage,
-            this.timeoutMs,
-            attemptDebugBasePath
-          );
-          break;
-        } catch (error) {
-          const retryMessage = cleanText(error?.message || error);
-          if (!isRetryableGeminiJsonError(retryMessage)) {
-            throw error;
-          }
-          lastGeminiJsonError = retryMessage;
-        }
-      }
-      if (!parsed) {
-        parsed = fallbackGeminiResult(row, firstOrganicUrl, lastGeminiJsonError);
+        parsed = fallbackGeminiResult(row, firstOrganicUrl, message);
         usedFallback = true;
       }
       const result = normalizedFirstResult(parsed, row, firstOrganicUrl);
@@ -2029,7 +2028,7 @@ class GeminiPlaywrightAgent {
       return {
         company: result.company_name || company,
         message: usedFallback
-          ? "Gemini empty JSON fallback saved after retries"
+          ? "Gemini timed out; empty output saved"
           : "Gemini JSON received"
       };
     } catch (error) {
