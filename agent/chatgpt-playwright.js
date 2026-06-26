@@ -111,12 +111,12 @@ function googleQueryTextFromUrl(value) {
 }
 
 function googleQueryText(row) {
-  const existingQuery = googleQueryTextFromUrl(row.consigneeUrl);
+  const existingQuery = googleQueryTextFromUrl(row.consigneeUrl) || googleQueryTextFromUrl(row.consignee);
   if (existingQuery) {
     return existingQuery;
   }
   const query = [
-    cleanText(row.websiteName || row.companyName || row.consignee),
+    cleanText(row.consignee || row.websiteName || row.companyName),
     cleanText(row.country)
   ].filter(Boolean).join(" ");
   return cleanSearchQueryText(query);
@@ -145,8 +145,10 @@ function isNonWebsiteResultUrl(value) {
     const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
     const blockedHosts = [
       "google",
+      "googleadservices",
       "googleusercontent",
       "gstatic",
+      "doubleclick",
       "facebook",
       "instagram",
       "linkedin",
@@ -164,6 +166,44 @@ function isNonWebsiteResultUrl(value) {
   } catch (error) {
     return true;
   }
+}
+
+function cleanGoogleResultUrl(value) {
+  const raw = cleanText(value);
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw, "https://www.google.com");
+    const host = parsed.hostname.toLowerCase();
+    if ((host === "google.com" || host.endsWith(".google.com")) && parsed.pathname === "/url") {
+      return normalizeFirstResultUrl(parsed.searchParams.get("q") || parsed.searchParams.get("url"));
+    }
+    return normalizeFirstResultUrl(parsed.href);
+  } catch (error) {
+    return "";
+  }
+}
+
+function googleOrganicResultUrls(candidates, limit = 3) {
+  const seen = new Set();
+  const output = [];
+  for (const candidate of candidates || []) {
+    const url = cleanGoogleResultUrl(candidate?.href || candidate?.url || candidate);
+    if (!url || seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+    output.push(url);
+    if (output.length >= limit) {
+      break;
+    }
+  }
+  return output;
+}
+
+function firstGoogleOrganicResultUrl(candidates) {
+  return googleOrganicResultUrls(candidates, 1)[0] || "";
 }
 
 function rawUrlText(value) {
@@ -509,11 +549,11 @@ function batchId(position) {
 function batchResultPrompt(items) {
   const inputJson = JSON.stringify(items.map((item) => ({
     batch_id: item.batchId,
-    query: item.queryText
+    website_candidates: item.websiteCandidates || []
   })), null, 2);
 
   return [
-    "Find the first Google organic website URL, then scrape that selected website/domain for phone and email.",
+    "Choose the first valid website URL from Google candidates, then find phone and email for that selected website_url.",
     "Return ONLY one valid JSON array. No markdown, no prose, no code fences, no extra text.",
     `The array must contain exactly ${items.length} objects, in the same order as the inputs.`,
     "Every object must use exactly these keys:",
@@ -521,11 +561,10 @@ function batchResultPrompt(items) {
     "Rules:",
     "- Never refuse, apologize, explain limitations, or say you cannot browse. If a field cannot be verified, return an empty string for that field and still return JSON.",
     "- Copy batch_id exactly.",
-    "- Search the exact query like a normal Google search.",
-    "- Read results top to bottom and pick the first real organic website/page URL.",
-    "- Skip ads, maps/local pack, AI answers, Google-owned pages, social profiles, and video pages like LinkedIn, Facebook, Instagram, YouTube, X/Twitter, TikTok, Pinterest.",
-    "- Do not pick a nicer, official, cleaner, related, or later URL. website_url must be the first valid organic result.",
-    "- Lock website_url. Never change it while finding phone/email.",
+    "- website_candidates are the top Google result URLs already collected by Chrome, in order.",
+    "- Pick website_url from website_candidates: use the first URL that is a real website/page and not sponsored/ad, LinkedIn, Facebook, Instagram, YouTube, X/Twitter, TikTok, Pinterest, Google, gstatic, googleusercontent, or other social/video/search-engine URL.",
+    "- Do not Google-search for another URL. Do not use any URL outside website_candidates. Do not replace it with a nicer, official, cleaner, or related URL.",
+    "- If no valid website candidate exists, return empty strings for website_url, phone_number, and email.",
     "- Before returning phone/email, fully scrape/crawl the selected website_url domain first. Do not stop at only the selected page.",
     "- Check the full selected website/domain: selected page, homepage, header, footer, visible text, tables, FAQ, buttons, mailto/tel links, page source snippets, sitemap, and same-domain contact/about/location/branch/support/inquiry/privacy/terms pages.",
     "- Follow same-domain navigation/footer/contact links that may contain phone/email. Finish this website/domain scrape before using deep-search.",
@@ -533,7 +572,6 @@ function batchResultPrompt(items) {
     "- Only if phone/email is not found after full website_url/domain scraping, then deep-search/web-search exact website_url, domain, page title, and company/listing name with phone/email/contact.",
     "- Use deep-search contact only when it clearly belongs to the same website_url/domain/company/listing. Keep website_url unchanged.",
     "- Never use contact from an unrelated domain or unrelated company. Never guess.",
-    "- If website_url is not found, return empty strings for website_url, phone_number, and email.",
     "- If phone or email is not found after website scraping plus deep/web search, use an empty string for that field.",
     "- Phone/email must be complete and readable. No hidden, partial, masked, protected, guessed, or placeholder values.",
     "- Use raw URLs only. Do not wrap URLs in markdown. Do not add extra keys.",
@@ -1404,6 +1442,135 @@ async function googleCaptchaMessage(page) {
   return "";
 }
 
+async function dismissGoogleConsent(page) {
+  const labels = [
+    /^accept all$/i,
+    /^i agree$/i,
+    /^agree$/i,
+    /^accept$/i
+  ];
+  for (const label of labels) {
+    const button = page.getByRole("button", { name: label }).first();
+    if (await button.count().catch(() => 0) && await button.isVisible().catch(() => false)) {
+      await button.click().catch(() => {});
+      await page.waitForTimeout(1000);
+      return;
+    }
+  }
+}
+
+async function googleResultCandidates(page) {
+  return page.evaluate(() => {
+    const visible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+        && rect.width > 8
+        && rect.height > 8
+        && rect.bottom > 80;
+    };
+    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const candidateFromAnchor = (anchor, strong = false) => {
+      const rect = anchor.getBoundingClientRect();
+      const card = anchor.closest("[data-sokoban-container], .MjjYud, .g, div[jscontroller], div[data-hveid]") || anchor;
+      const cardText = clean(card.innerText || card.textContent || "");
+      return {
+        href: anchor.href,
+        text: clean(anchor.innerText || anchor.textContent || ""),
+        cardText,
+        top: Math.round(rect.top),
+        left: Math.round(rect.left),
+        strong
+      };
+    };
+    const isAd = (candidate) => /\b(sponsored|ad|ads|advertisement)\b/i.test(candidate.cardText);
+    const resultCards = Array.from(document.querySelectorAll("#search .MjjYud, #search .g, #search [data-sokoban-container], #search div[data-hveid]"));
+    const cardCandidates = [];
+    const seenCards = new Set();
+    for (const card of resultCards) {
+      if (seenCards.has(card) || !visible(card)) {
+        continue;
+      }
+      seenCards.add(card);
+      const anchor = Array.from(card.querySelectorAll("a[href]"))
+        .find((link) => visible(link) && Array.from(link.querySelectorAll("h3")).some(visible));
+      if (!anchor) {
+        continue;
+      }
+      const candidate = candidateFromAnchor(anchor, true);
+      if (!isAd(candidate)) {
+        cardCandidates.push(candidate);
+      }
+    }
+    if (cardCandidates.length) {
+      return cardCandidates;
+    }
+    const titleAnchors = Array.from(document.querySelectorAll("#search a[href] h3"))
+      .map((heading) => heading.closest("a[href]"))
+      .filter(Boolean)
+      .filter(visible)
+      .map((anchor) => candidateFromAnchor(anchor, true))
+      .filter((candidate) => !isAd(candidate));
+    if (titleAnchors.length) {
+      return titleAnchors;
+    }
+    return Array.from(document.querySelectorAll("#search a[href], a[href]"))
+      .filter(visible)
+      .map((anchor) => candidateFromAnchor(anchor, false))
+      .filter((candidate) => !isAd(candidate));
+  }).catch(() => []);
+}
+
+async function waitForGoogleTopResults(page, timeoutMs, debugBasePath, limit = 3) {
+  const deadline = Date.now() + timeoutMs;
+  let lastText = "";
+  let bestUrls = [];
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    await dismissGoogleConsent(page);
+    const captchaMessage = await googleCaptchaMessage(page);
+    if (captchaMessage) {
+      if (debugBasePath) {
+        await page.screenshot({ path: `${debugBasePath}-google-captcha.png`, fullPage: true }).catch(() => {});
+        fs.writeFileSync(`${debugBasePath}-google-captcha.html`, await page.content().catch(() => ""));
+      }
+      throw new Error(captchaMessage);
+    }
+    const candidates = await googleResultCandidates(page);
+    const urls = googleOrganicResultUrls(candidates, limit);
+    if (urls.length >= limit) {
+      return urls;
+    }
+    if (urls.length) {
+      if (urls.join("\n") === bestUrls.join("\n")) {
+        stableSince = stableSince || Date.now();
+        if (Date.now() - stableSince > 2500) {
+          return urls;
+        }
+      } else {
+        bestUrls = urls;
+        stableSince = 0;
+      }
+    }
+    lastText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => lastText);
+    await page.waitForTimeout(500);
+  }
+  if (bestUrls.length) {
+    return bestUrls;
+  }
+  if (debugBasePath) {
+    await page.screenshot({ path: `${debugBasePath}-google-timeout.png`, fullPage: true }).catch(() => {});
+    fs.writeFileSync(`${debugBasePath}-google-timeout.txt`, lastText);
+  }
+  throw new Error("Google organic results timed out");
+}
+
+async function waitForGoogleFirstResult(page, timeoutMs, debugBasePath) {
+  return (await waitForGoogleTopResults(page, timeoutMs, debugBasePath, 1))[0] || "";
+}
+
 function rowCompanyName(row) {
   return cleanText(row.websiteName || row.companyName || row.consignee);
 }
@@ -1420,6 +1587,18 @@ function applySkippedResult(output, entry, message) {
       email: "",
       phone: "",
       contactSource: `ChatGPT Playwright skipped: ${message}`
+    };
+  }
+}
+
+function applyGoogleWebsiteResult(output, item, websiteUrl, message = "Google first organic result") {
+  for (const index of item.entry.indexes) {
+    output[index] = {
+      ...output[index],
+      websiteUrl,
+      email: "",
+      phone: "",
+      contactSource: websiteUrl ? message : `Google search skipped: ${message}`
     };
   }
 }
@@ -1443,22 +1622,28 @@ function applyChatGPTResult(output, entry, result, resultListPath) {
 
 function batchFallbackResult(item, reason) {
   const row = item.entry.row;
+  const websiteUrl = normalizeFirstResultUrl(item.websiteUrl || item.websiteCandidates?.[0]);
   return {
     batch_id: item.batchId,
     company_name: rowCompanyName(row),
-    website_url: "",
+    website_url: websiteUrl,
     phone_number: "",
     email: "",
-    source_url: "",
+    source_url: websiteUrl,
     confidence: 0,
     notes: cleanText(reason || "No ChatGPT batch JSON result")
   };
 }
 
 function applyBatchChatGPTResult(output, item, parsed, reason) {
+  const candidateUrls = (item.websiteCandidates || []).map(normalizeFirstResultUrl).filter(Boolean);
+  const fallbackWebsiteUrl = normalizeFirstResultUrl(item.websiteUrl || candidateUrls[0]);
   const parsedWebsiteUrl = parsed && typeof parsed === "object"
     ? normalizeFirstResultUrl(parsed.website_url || parsed.websiteUrl)
     : "";
+  const websiteUrl = parsedWebsiteUrl && (!candidateUrls.length || candidateUrls.includes(parsedWebsiteUrl))
+    ? parsedWebsiteUrl
+    : fallbackWebsiteUrl;
   const parsedSourceUrl = parsed && typeof parsed === "object"
     ? normalizeFirstResultUrl(parsed.source_url)
     : "";
@@ -1467,12 +1652,12 @@ function applyBatchChatGPTResult(output, item, parsed, reason) {
       ...parsed,
       batch_id: cleanText(parsed.batch_id || parsed.id || item.batchId),
       company_name: cleanText(parsed.company_name) || rowCompanyName(item.entry.row),
-      website_url: parsedWebsiteUrl,
-      source_url: parsedSourceUrl || parsedWebsiteUrl,
+      website_url: websiteUrl,
+      source_url: parsedSourceUrl || websiteUrl,
       notes: cleanText(parsed.notes) || cleanText(reason)
     }
     : batchFallbackResult(item, reason);
-  const result = normalizedFirstResult(source, item.entry.row, parsedWebsiteUrl);
+  const result = normalizedFirstResult(source, item.entry.row, websiteUrl);
   if (result.phone_number && shouldClearRejectedContact(result)) {
     result.phone_number = "";
   }
@@ -1487,11 +1672,15 @@ class ChatGptPlaywrightAgent {
   constructor() {
     loadEnv(path.resolve(process.cwd(), ".env"));
     this.profileDir = path.resolve(process.cwd(), process.env.CHATGPT_PROFILE_DIR || "agent-data/chatgpt-profile");
+    this.googleProfileDir = path.resolve(process.cwd(), process.env.GOOGLE_PROFILE_DIR || "agent-data/google-profile");
     this.headless = booleanEnv("CHATGPT_HEADLESS", true);
+    this.googleHeadless = booleanEnv("GOOGLE_HEADLESS", booleanEnv("GEMINI_HEADLESS", this.headless));
     this.timeoutMs = Number(process.env.CHATGPT_TIMEOUT_MS || 30000);
     this.batchTimeoutMs = numericEnv("CHATGPT_BATCH_TIMEOUT_MS", Math.max(this.timeoutMs, 600000), 15000, 900000);
     this.batchSize = numericEnv("CHATGPT_BATCH_SIZE", 25, 1, 50);
     this.chatgptBatchParallelism = numericEnv("CHATGPT_BATCH_PARALLELISM", 4, 1, 4);
+    this.googleSearchParallelism = numericEnv("GOOGLE_SEARCH_PARALLELISM", 6, 1, 12);
+    this.googleSearchTimeoutMs = numericEnv("GOOGLE_SEARCH_TIMEOUT_MS", 90000, 10000, 300000);
     this.promptReviewMs = numericEnv("CHATGPT_PROMPT_REVIEW_MS", 0, 0, 600000);
     this.parallelism = numericEnv("CHATGPT_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
     this.parallelismAuto = booleanEnv("CHATGPT_PARALLELISM_AUTO", true);
@@ -1504,11 +1693,20 @@ class ChatGptPlaywrightAgent {
     this.workerStaggerMs = numericEnv("CHATGPT_WORKER_STAGGER_MS", 900, 0, 10000);
     this.context = null;
     this.contextHeadless = null;
+    this.launchPromise = null;
+    this.launchPromiseHeadless = null;
+    this.googleContext = null;
+    this.googleContextHeadless = null;
+    this.googleLaunchPromise = null;
+    this.googleLaunchPromiseHeadless = null;
     this.chatgptPage = null;
     this.activeWorkerPages = 0;
+    this.googleActiveWorkerPages = 0;
     this.reservedWorkerPages = new WeakSet();
+    this.reservedGoogleWorkerPages = new WeakSet();
     this.currentPageLimit = 1;
     this.manualIntervention = null;
+    this.googleManualIntervention = null;
     this.interventionSerial = 0;
   }
 
@@ -1516,15 +1714,19 @@ class ChatGptPlaywrightAgent {
     if (this.context && this.contextHeadless === headless) {
       return this.context;
     }
+    if (this.launchPromise && this.launchPromiseHeadless === headless) {
+      return this.launchPromise;
+    }
     if (this.context) {
       if (this.activeWorkerPages > 0) {
         throw new Error("Cannot switch Playwright browser mode while worker pages are active");
       }
       await this.closeContext();
     }
-    fs.mkdirSync(this.profileDir, { recursive: true });
-    clearProfileCaches(this.profileDir);
-    try {
+    this.launchPromiseHeadless = headless;
+    this.launchPromise = (async () => {
+      fs.mkdirSync(this.profileDir, { recursive: true });
+      clearProfileCaches(this.profileDir);
       this.context = await chromium.launchPersistentContext(this.profileDir, {
         channel: "chrome",
         headless,
@@ -1538,7 +1740,29 @@ class ChatGptPlaywrightAgent {
         ]
       });
       this.contextHeadless = headless;
+      if (this.blockHeavyResources) {
+        await this.context.route("**/*", async (route) => {
+          const resourceType = route.request().resourceType();
+          const requestUrl = route.request().url();
+          const isAuthChallenge = /accounts\.google\.com|recaptcha|\/challenge\//i.test(requestUrl);
+          const isChatGptUi = isChatGptUiUrl(requestUrl);
+          const blockedTypes = headless
+            ? ["font", "image", "media", "texttrack", "stylesheet"]
+            : ["font", "image", "media", "texttrack"];
+          if (!isAuthChallenge && !isChatGptUi && blockedTypes.includes(resourceType)) {
+            await route.abort().catch(() => {});
+            return;
+          }
+          await route.continue().catch(() => {});
+        });
+      }
+      return this.context;
+    })();
+    try {
+      return await this.launchPromise;
     } catch (error) {
+      this.context = null;
+      this.contextHeadless = null;
       const message = cleanText(error?.message || error);
       if (/profile is already in use|opening in existing browser session/i.test(message)) {
         throw new Error(
@@ -1547,24 +1771,69 @@ class ChatGptPlaywrightAgent {
         );
       }
       throw error;
+    } finally {
+      if (this.launchPromiseHeadless === headless) {
+        this.launchPromise = null;
+        this.launchPromiseHeadless = null;
+      }
     }
-    if (this.blockHeavyResources) {
-      await this.context.route("**/*", async (route) => {
-        const resourceType = route.request().resourceType();
-        const requestUrl = route.request().url();
-        const isAuthChallenge = /accounts\.google\.com|recaptcha|\/challenge\//i.test(requestUrl);
-        const isChatGptUi = isChatGptUiUrl(requestUrl);
-        const blockedTypes = headless
-          ? ["font", "image", "media", "texttrack", "stylesheet"]
-          : ["font", "image", "media", "texttrack"];
-        if (!isAuthChallenge && !isChatGptUi && blockedTypes.includes(resourceType)) {
-          await route.abort().catch(() => {});
-          return;
-        }
-        await route.continue().catch(() => {});
+  }
+
+  async launchGoogle(headless = true) {
+    if (this.googleContext && this.googleContextHeadless === headless) {
+      return this.googleContext;
+    }
+    if (this.googleLaunchPromise && this.googleLaunchPromiseHeadless === headless) {
+      return this.googleLaunchPromise;
+    }
+    if (this.googleContext) {
+      if (this.googleActiveWorkerPages > 0) {
+        throw new Error("Cannot switch Google browser mode while Google worker pages are active");
+      }
+      await this.closeGoogleContext();
+    }
+    this.googleLaunchPromiseHeadless = headless;
+    this.googleLaunchPromise = (async () => {
+      fs.mkdirSync(this.googleProfileDir, { recursive: true });
+      clearProfileCaches(this.googleProfileDir);
+      this.googleContext = await chromium.launchPersistentContext(this.googleProfileDir, {
+        channel: "chrome",
+        headless,
+        viewport: { width: 1440, height: 1000 },
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--disable-features=CalculateNativeWinOcclusion",
+          `--disk-cache-size=${this.diskCacheMb * 1024 * 1024}`,
+          `--media-cache-size=${Math.min(this.diskCacheMb, 64) * 1024 * 1024}`,
+          ...(headless ? [] : ["--no-first-run"])
+        ]
       });
+      this.googleContextHeadless = headless;
+      if (this.blockHeavyResources) {
+        await this.googleContext.route("**/*", async (route) => {
+          const resourceType = route.request().resourceType();
+          const requestUrl = route.request().url();
+          const isAuthChallenge = /accounts\.google\.com|recaptcha|\/challenge\//i.test(requestUrl);
+          const blockedTypes = headless
+            ? ["font", "image", "media", "texttrack", "stylesheet"]
+            : ["font", "image", "media", "texttrack"];
+          if (!isAuthChallenge && blockedTypes.includes(resourceType)) {
+            await route.abort().catch(() => {});
+            return;
+          }
+          await route.continue().catch(() => {});
+        });
+      }
+      return this.googleContext;
+    })();
+    try {
+      return await this.googleLaunchPromise;
+    } finally {
+      if (this.googleLaunchPromiseHeadless === headless) {
+        this.googleLaunchPromise = null;
+        this.googleLaunchPromiseHeadless = null;
+      }
     }
-    return this.context;
   }
 
   async openLogin(options = {}) {
@@ -1629,6 +1898,14 @@ class ChatGptPlaywrightAgent {
     this.chatgptPage = null;
     this.activeWorkerPages = 0;
     this.reservedWorkerPages = new WeakSet();
+  }
+
+  async closeGoogleContext() {
+    await this.googleContext?.close().catch(() => {});
+    this.googleContext = null;
+    this.googleContextHeadless = null;
+    this.googleActiveWorkerPages = 0;
+    this.reservedGoogleWorkerPages = new WeakSet();
   }
 
   async waitForManualIntervention({ page, trackedPage, kind, url, onStatus = () => {} }) {
@@ -1707,6 +1984,68 @@ class ChatGptPlaywrightAgent {
     return promise;
   }
 
+  async waitForGoogleManualIntervention({ page, url, onStatus = () => {} }) {
+    if (this.googleManualIntervention) {
+      await this.closeGoogleWorkerPage(page);
+      return this.googleManualIntervention.promise;
+    }
+
+    let resolveIntervention;
+    let rejectIntervention;
+    const promise = new Promise((resolve, reject) => {
+      resolveIntervention = resolve;
+      rejectIntervention = reject;
+    });
+    this.googleManualIntervention = { promise, kind: "captcha" };
+
+    try {
+      onStatus(
+        "waiting_captcha",
+        "Opening Chrome now for Google CAPTCHA. Google search will resume after it is solved."
+      );
+      await this.closeGoogleWorkerPage(page);
+      await this.closeGoogleContext();
+      const visibleContext = await this.launchGoogle(false);
+      const visiblePage = visibleContext.pages().find((candidate) => !candidate.isClosed()) || await visibleContext.newPage();
+      await visiblePage.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+      await visiblePage.bringToFront().catch(() => {});
+      await visiblePage.waitForTimeout(1200);
+
+      const deadline = Date.now() + 15 * 60 * 1000;
+      let solved = false;
+      while (Date.now() < deadline) {
+        if (visiblePage.isClosed()) {
+          throw new Error("Manual Google CAPTCHA window was closed before completion");
+        }
+        onStatus(
+          "waiting_captcha",
+          "Solve the Google CAPTCHA in the opened Chrome window. Google search will resume automatically."
+        );
+        solved = !await googleCaptchaMessage(visiblePage);
+        if (solved) {
+          break;
+        }
+        await visiblePage.waitForTimeout(1500);
+      }
+      if (!solved) {
+        throw new Error("Manual Google CAPTCHA timed out");
+      }
+
+      await this.closeGoogleContext();
+      const resumedContext = await this.launchGoogle(this.googleHeadless);
+      for (const idlePage of resumedContext.pages()) {
+        await idlePage.close().catch(() => {});
+      }
+      resolveIntervention();
+    } catch (error) {
+      rejectIntervention(error);
+      return promise;
+    } finally {
+      this.googleManualIntervention = null;
+    }
+    return promise;
+  }
+
   async ensureChatGPTLogin(onStatus = () => {}) {
     const page = await this.openLogin();
     if (await this.waitForPrompt(page, 60000)) {
@@ -1775,6 +2114,50 @@ class ChatGptPlaywrightAgent {
     this.activeWorkerPages = Math.max(0, this.activeWorkerPages - 1);
   }
 
+  async newGoogleWorkerPage(onWait = () => {}) {
+    while (this.googleManualIntervention) {
+      await this.googleManualIntervention.promise;
+    }
+    while (true) {
+      const freeMemoryMb = availableMemoryMb();
+      const lowMemory = this.googleActiveWorkerPages > 0
+        && this.minFreeMemoryMb > 0
+        && freeMemoryMb < this.minFreeMemoryMb;
+      const reserveRisk = this.googleActiveWorkerPages > 0
+        && this.systemReserveMemoryMb > 0
+        && freeMemoryMb - this.pageMemoryMb < this.systemReserveMemoryMb;
+      if (!lowMemory && !reserveRisk) {
+        break;
+      }
+      onWait(freeMemoryMb);
+      await delay(2500);
+    }
+    this.googleActiveWorkerPages += 1;
+    try {
+      const context = await this.launchGoogle(this.googleHeadless);
+      const blankPage = context.pages().find((page) => (
+        !page.isClosed()
+        && page.url() === "about:blank"
+        && !this.reservedGoogleWorkerPages.has(page)
+      ));
+      const page = blankPage || await context.newPage();
+      this.reservedGoogleWorkerPages.add(page);
+      return page;
+    } catch (error) {
+      this.googleActiveWorkerPages = Math.max(0, this.googleActiveWorkerPages - 1);
+      throw error;
+    }
+  }
+
+  async closeGoogleWorkerPage(page) {
+    if (!page) {
+      return;
+    }
+    await page.close().catch(() => {});
+    this.reservedGoogleWorkerPages.delete(page);
+    this.googleActiveWorkerPages = Math.max(0, this.googleActiveWorkerPages - 1);
+  }
+
   effectiveParallelism(entriesCount) {
     return adaptiveParallelismLimit({
       requested: this.parallelism,
@@ -1790,7 +2173,6 @@ class ChatGptPlaywrightAgent {
   }
 
   async processRows(rows, jobDir, onProgress = () => {}) {
-    await this.launch(this.headless);
     const unique = new Map();
     rows.forEach((row, index) => {
       const key = companyKey(row);
@@ -1809,32 +2191,36 @@ class ChatGptPlaywrightAgent {
 
     const batchSize = Math.min(this.batchSize, entries.length);
     const batchParallelism = Math.min(this.chatgptBatchParallelism, Math.max(1, Math.ceil(entries.length / batchSize)));
-    this.currentPageLimit = Math.max(1, batchParallelism);
+    const totalBatches = Math.ceil(entries.length / batchSize);
+    const googleParallelism = Math.min(this.googleSearchParallelism, entries.length);
+    this.currentPageLimit = Math.max(1, googleParallelism + batchParallelism);
+    let googleCompleted = 0;
     let completed = 0;
+    let nextGoogleIndex = 0;
     let nextBatchIndex = 0;
     onProgress({
       status: "running",
       processed: 0,
       total: entries.length,
       company: "",
-      message: `Starting direct ChatGPT extraction: ${batchSize}-query batch(es), ${batchParallelism} in parallel`,
+      message: `Starting Google top-3 search: ${googleParallelism} parallel tab(s); ChatGPT starts every ${batchSize} ready result set(s)`,
       rows: output
     });
 
     const indexedEntries = entries.map((entry, position) => ({ entry, position }));
-    const batches = [];
-    for (let start = 0; start < indexedEntries.length; start += batchSize) {
-      batches.push(indexedEntries.slice(start, start + batchSize));
-    }
-
+    const googleItems = indexedEntries.map(({ entry, position }) => this.googleSearchItem(entry, position, jobDir));
+    const activeGoogleSearches = new Set();
     const activeChatGptBatches = new Set();
+    const pendingChatGptItems = [];
 
-    const startChatGptBatch = (batchIndex, workerIndex) => {
-      const items = this.directChatGPTBatchItems(batches[batchIndex], jobDir);
+    const startChatGptBatch = (items, workerIndex) => {
+      const batchIndex = nextBatchIndex;
+      nextBatchIndex += 1;
+      const batchItems = this.chatGPTContactBatchItems(items);
       const task = this.processChatGPTBatch({
-        items,
+        items: batchItems,
         batchIndex,
-        totalBatches: batches.length,
+        totalBatches,
         total: entries.length,
         output,
         jobDir,
@@ -1843,7 +2229,7 @@ class ChatGptPlaywrightAgent {
         completedCount: () => completed,
         onProgress
       }).then((result) => {
-        completed += items.length;
+        completed += batchItems.length;
         onProgress({
           status: "running",
           processed: completed,
@@ -1858,14 +2244,67 @@ class ChatGptPlaywrightAgent {
       activeChatGptBatches.add(task);
     };
 
-    while (activeChatGptBatches.size || nextBatchIndex < batches.length) {
-      while (nextBatchIndex < batches.length && activeChatGptBatches.size < batchParallelism) {
-        const batchIndex = nextBatchIndex;
-        nextBatchIndex += 1;
-        startChatGptBatch(batchIndex, activeChatGptBatches.size);
+    const drainChatGptQueue = (force = false) => {
+      while (
+        activeChatGptBatches.size < batchParallelism
+        && pendingChatGptItems.length
+        && (pendingChatGptItems.length >= batchSize || force)
+      ) {
+        const items = pendingChatGptItems.splice(0, batchSize);
+        startChatGptBatch(items, activeChatGptBatches.size);
+      }
+    };
+
+    const startGoogleSearch = (item, workerIndex) => {
+      const task = this.collectGoogleResultItem({
+        item,
+        output,
+        jobDir,
+        workerIndex,
+        googleParallelism,
+        total: entries.length,
+        completedCount: () => completed,
+        onProgress
+      }).then((result) => {
+        googleCompleted += 1;
+        if (result.websiteCandidates?.length) {
+          pendingChatGptItems.push(result);
+        }
+        onProgress({
+          status: "running",
+          processed: completed,
+          total: entries.length,
+          company: result.company,
+          message: result.websiteUrl
+            ? `Google result ${googleCompleted}/${entries.length}: ${result.websiteUrl}`
+            : `Google result ${googleCompleted}/${entries.length}: blank`,
+          rows: output
+        });
+        drainChatGptQueue(false);
+      }).finally(() => {
+        activeGoogleSearches.delete(task);
+      });
+      activeGoogleSearches.add(task);
+    };
+
+    while (
+      activeGoogleSearches.size
+      || activeChatGptBatches.size
+      || pendingChatGptItems.length
+      || nextGoogleIndex < googleItems.length
+    ) {
+      while (nextGoogleIndex < googleItems.length && activeGoogleSearches.size < googleParallelism) {
+        const item = googleItems[nextGoogleIndex];
+        nextGoogleIndex += 1;
+        startGoogleSearch(item, activeGoogleSearches.size);
       }
 
+      drainChatGptQueue(nextGoogleIndex >= googleItems.length && activeGoogleSearches.size === 0);
+
       const waiters = [];
+      for (const task of activeGoogleSearches) {
+        waiters.push(task.then(() => ({ type: "google" }), () => ({ type: "google" })));
+      }
       for (const task of activeChatGptBatches) {
         waiters.push(task.then(() => ({ type: "chatgpt" }), () => ({ type: "chatgpt" })));
       }
@@ -1875,8 +2314,158 @@ class ChatGptPlaywrightAgent {
       await Promise.race(waiters);
     }
 
+    await Promise.all(activeGoogleSearches);
     await Promise.all(activeChatGptBatches);
     return output;
+  }
+
+  googleSearchItem(entry, position, jobDir) {
+    const row = entry.row;
+    const queryText = googleQueryText(row);
+    const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-chatgpt-input.json`);
+    const googleResultPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-google-result.json`);
+    const item = {
+      batchId: batchId(position),
+      entry,
+      position,
+      queryText,
+      websiteUrl: "",
+      websiteCandidates: [],
+      resultListPath,
+      googleResultPath,
+      company: rowCompanyName(row),
+      error: ""
+    };
+    fs.writeFileSync(googleResultPath, JSON.stringify({
+      batch_id: item.batchId,
+      query: queryText,
+      google_url: googleQueryUrl(row),
+      website_candidates: [],
+      website_url: ""
+    }, null, 2));
+    return item;
+  }
+
+  chatGPTContactBatchItems(batch) {
+    return batch.map((item) => {
+      fs.writeFileSync(item.resultListPath, JSON.stringify({
+        batch_id: item.batchId,
+        website_candidates: item.websiteCandidates || [],
+        website_url: item.websiteUrl || "",
+        google_query: item.queryText,
+        google_error: item.error
+      }, null, 2));
+      return item;
+    });
+  }
+
+  async collectGoogleResultItem({
+    item,
+    output,
+    workerIndex = 0,
+    googleParallelism = 1,
+    total,
+    completedCount,
+    onProgress
+  }) {
+    let page = null;
+    let lastError = "";
+    const debugBasePath = path.join(
+      path.dirname(item.googleResultPath),
+      `${String(item.position + 1).padStart(5, "0")}-google`
+    );
+    const progress = (message, status = "running") => onProgress({
+      status,
+      processed: completedCount(),
+      total,
+      company: item.company,
+      message: workerMessage(workerIndex, googleParallelism, message)
+    });
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        page = await this.newGoogleWorkerPage((freeMemoryMb) => {
+          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
+        });
+        const searchUrl = googleQueryUrl(item.entry.row);
+        if (!searchUrl) {
+          throw new Error("Google query unavailable");
+        }
+        progress(`Google search ${attempt}/3: ${item.queryText}`);
+        await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+        const websiteCandidates = await waitForGoogleTopResults(
+          page,
+          this.googleSearchTimeoutMs,
+          `${debugBasePath}-attempt-${attempt}`,
+          3
+        );
+        const websiteUrl = websiteCandidates[0] || "";
+        item.websiteUrl = websiteUrl;
+        item.websiteCandidates = websiteCandidates;
+        item.error = "";
+        fs.writeFileSync(item.googleResultPath, JSON.stringify({
+          batch_id: item.batchId,
+          query: item.queryText,
+          google_url: searchUrl,
+          website_candidates: websiteCandidates,
+          website_url: websiteUrl,
+          error: ""
+        }, null, 2));
+        applyGoogleWebsiteResult(output, item, websiteUrl);
+        return item;
+      } catch (error) {
+        lastError = cleanText(error?.message || error);
+        const captcha = /Google CAPTCHA|rate limit/i.test(lastError);
+        const closed = /target page|browser has been closed|context.*closed|page.*closed/i.test(lastError);
+        if (captcha && page) {
+          const captchaUrl = page.url();
+          const captchaPage = page;
+          page = null;
+          await this.waitForGoogleManualIntervention({
+            page: captchaPage,
+            url: captchaUrl,
+            onStatus: (status, message) => onProgress({
+              status,
+              processed: completedCount(),
+              total,
+              company: item.company,
+              message
+            })
+          });
+          continue;
+        }
+        if (closed && attempt < 3) {
+          if (this.manualIntervention) {
+            await this.manualIntervention.promise;
+          } else {
+            await delay(1200);
+          }
+          continue;
+        }
+        if (attempt < 3 && /timeout|net::|navigation/i.test(lastError)) {
+          await delay(1200);
+          continue;
+        }
+        break;
+      } finally {
+        await this.closeGoogleWorkerPage(page);
+        page = null;
+      }
+    }
+
+    item.websiteUrl = "";
+    item.websiteCandidates = [];
+    item.error = lastError || "No Google first organic result";
+    fs.writeFileSync(item.googleResultPath, JSON.stringify({
+      batch_id: item.batchId,
+      query: item.queryText,
+      google_url: googleQueryUrl(item.entry.row),
+      website_candidates: [],
+      website_url: "",
+      error: item.error
+    }, null, 2));
+    applyGoogleWebsiteResult(output, item, "", item.error);
+    return item;
   }
 
   directChatGPTBatchItems(batch, jobDir) {
@@ -1895,6 +2484,7 @@ class ChatGptPlaywrightAgent {
       };
       fs.writeFileSync(resultListPath, JSON.stringify({
         batch_id: item.batchId,
+        website_url: item.websiteUrl || "",
         query: queryText
       }, null, 2));
       return item;
@@ -1929,61 +2519,78 @@ class ChatGptPlaywrightAgent {
     });
 
     try {
-      try {
-        chatgptPage = await this.newWorkerPage((freeMemoryMb) => {
-          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
-        });
-        await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
-        if (!await this.waitForPrompt(chatgptPage, 60000)) {
-          if (!await isLikelyChatGptLoginPage(chatgptPage)) {
-            await chatgptPage.screenshot({ path: `${debugBasePath}-prompt-not-ready.png`, fullPage: true }).catch(() => {});
-            fs.writeFileSync(`${debugBasePath}-prompt-not-ready.html`, await chatgptPage.content().catch(() => ""));
-            throw new Error("ChatGPT prompt was not ready in background Chrome; saved debug page without opening login window");
-          }
-          const loginPage = chatgptPage;
-          chatgptPage = null;
-          await this.waitForManualIntervention({
-            page: loginPage,
-            trackedPage: true,
-            kind: "login",
-            url: AI_PROVIDER_URL,
-            onStatus: (status, message) => onProgress({
-              status,
-              processed: completedCount(),
-              total,
-              company: items[0]?.company || "",
-              message
-            })
-          });
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
           chatgptPage = await this.newWorkerPage((freeMemoryMb) => {
             progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
           });
           await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
           if (!await this.waitForPrompt(chatgptPage, 60000)) {
-            throw new Error("ChatGPT prompt was not available after manual login");
+            if (!await isLikelyChatGptLoginPage(chatgptPage)) {
+              await chatgptPage.screenshot({ path: `${debugBasePath}-prompt-not-ready.png`, fullPage: true }).catch(() => {});
+              fs.writeFileSync(`${debugBasePath}-prompt-not-ready.html`, await chatgptPage.content().catch(() => ""));
+              throw new Error("ChatGPT prompt was not ready in background Chrome; saved debug page without opening login window");
+            }
+            const loginPage = chatgptPage;
+            chatgptPage = null;
+            await this.waitForManualIntervention({
+              page: loginPage,
+              trackedPage: true,
+              kind: "login",
+              url: AI_PROVIDER_URL,
+              onStatus: (status, message) => onProgress({
+                status,
+                processed: completedCount(),
+                total,
+                company: items[0]?.company || "",
+                message
+              })
+            });
+            chatgptPage = await this.newWorkerPage((freeMemoryMb) => {
+              progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
+            });
+            await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+            if (!await this.waitForPrompt(chatgptPage, 60000)) {
+              throw new Error("ChatGPT prompt was not available after manual login");
+            }
           }
+          const highMode = await selectChatGptHighMode(chatgptPage);
+          if (highMode) {
+            progress(`ChatGPT mode: ${highMode}`);
+          }
+          await fillPrompt(chatgptPage, prompt);
+          if (!this.headless && this.promptReviewMs > 0) {
+            progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: visible prompt review`);
+            await chatgptPage.waitForTimeout(this.promptReviewMs);
+          }
+          progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: sending ${items.length} website URLs`);
+          await sendPrompt(chatgptPage, prompt, debugBasePath);
+          progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: waiting for ${items.length} JSON objects`);
+          parsedResults = await waitForChatGPTBatchJson(
+            chatgptPage,
+            items.length,
+            this.batchTimeoutMs,
+            debugBasePath,
+            items.map((item) => item.batchId)
+          );
+          errorMessage = "";
+          break;
+        } catch (error) {
+          errorMessage = cleanText(error?.message || error);
+          const closed = /target page|browser has been closed|context.*closed|page.*closed/i.test(errorMessage);
+          if (closed && attempt < 3) {
+            await this.closeWorkerPage(chatgptPage);
+            chatgptPage = null;
+            if (this.manualIntervention) {
+              await this.manualIntervention.promise;
+            } else {
+              await delay(1200);
+            }
+            progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: retrying after browser reset`);
+            continue;
+          }
+          break;
         }
-        const highMode = await selectChatGptHighMode(chatgptPage);
-        if (highMode) {
-          progress(`ChatGPT mode: ${highMode}`);
-        }
-        await fillPrompt(chatgptPage, prompt);
-        if (!this.headless && this.promptReviewMs > 0) {
-          progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: visible prompt review`);
-          await chatgptPage.waitForTimeout(this.promptReviewMs);
-        }
-        progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: sending ${items.length} query inputs`);
-        await sendPrompt(chatgptPage, prompt, debugBasePath);
-        progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: waiting for ${items.length} JSON objects`);
-        parsedResults = await waitForChatGPTBatchJson(
-          chatgptPage,
-          items.length,
-          this.batchTimeoutMs,
-          debugBasePath,
-          items.map((item) => item.batchId)
-        );
-      } catch (error) {
-        errorMessage = cleanText(error?.message || error);
       }
 
       const byId = new Map();
@@ -1993,7 +2600,7 @@ class ChatGptPlaywrightAgent {
       items.forEach((item) => {
         const parsed = byId.get(item.batchId) || null;
         const reason = item.error
-          ? `Query input unavailable: ${item.error}`
+          ? `Google website URL unavailable: ${item.error}`
           : (errorMessage ? `ChatGPT batch issue: ${errorMessage}` : "");
         applyBatchChatGPTResult(output, item, parsed, reason);
       });
@@ -2027,6 +2634,7 @@ class ChatGptPlaywrightAgent {
   }
 
   async close() {
+    await this.closeGoogleContext();
     await this.closeContext();
   }
 }

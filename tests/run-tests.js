@@ -2,6 +2,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { chromium: testChromium } = require("playwright-core");
 const {
   ChatGptPlaywrightAgent,
   parseJsonObject,
@@ -279,6 +280,13 @@ async function main() {
     googleQueryUrl(agentRow),
     "https://www.google.com/search?num=10&hl=en&q=RARR%20Nuts%20Trading%20LLC"
   );
+  assert.equal(googleQueryText({
+    websiteName: "Wrong Exporter Name",
+    companyName: "Wrong Exporter Name",
+    consignee: "Fuchsiana General Trading Llc",
+    exporterUrl: "https://google.com/search?q=Wrong%20Exporter%20Name",
+    country: "UNITED ARAB EMIRATES"
+  }), "Fuchsiana General Trading Llc UNITED ARAB EMIRATES");
   const ampersandQueryRow = {
     websiteName: "Spmuthiah & Sons Pte Ltd",
     consigneeUrl: "https://google.com/search?q=Spmuthiah%20&%20Sons%20Pte%20Ltd%20SINGAPORE",
@@ -429,6 +437,8 @@ async function main() {
   applyBatchChatGPTResult(fuchsianaOutput, {
     batchId: "Q001",
     entry: { row: fuchsianaOutput[0], indexes: [0] },
+    websiteCandidates: [fuchsianaRankOne, "https://www.example.org/other"],
+    websiteUrl: fuchsianaRankOne,
     resultListPath: "/tmp/q001-chatgpt-input.json"
   }, {
     batch_id: "Q001",
@@ -440,6 +450,20 @@ async function main() {
   assert.equal(fuchsianaOutput[0].phone, "+971 52 213 7960");
   assert.equal(fuchsianaOutput[0].email, "");
   assert.ok(fuchsianaOutput[0].contactSource.includes(fuchsianaRankOne));
+  const candidateTwoOutput = [{ ...fuchsianaOutput[0], websiteUrl: "", phone: "", email: "" }];
+  applyBatchChatGPTResult(candidateTwoOutput, {
+    batchId: "Q002",
+    entry: { row: candidateTwoOutput[0], indexes: [0] },
+    websiteCandidates: ["https://www.linkedin.com/company/example", fuchsianaRankOne],
+    websiteUrl: "",
+    resultListPath: "/tmp/q002-chatgpt-input.json"
+  }, {
+    batch_id: "Q002",
+    website_url: fuchsianaRankOne,
+    phone_number: "+971 52 213 7960",
+    email: ""
+  }, "");
+  assert.equal(candidateTwoOutput[0].websiteUrl, fuchsianaRankOne);
   const dynamicPortalContact = normalizedResult({
     company_name: "RARR Nuts Trading LLC",
     website_url: "https://www.eximpedia.app/companies/rarr",
@@ -506,15 +530,48 @@ async function main() {
   };
   pipelineAgent.batchSize = 25;
   pipelineAgent.chatgptBatchParallelism = 4;
-  pipelineAgent.collectGoogleResultsBatch = async ({ items, batchIndex }) => {
-    throw new Error(`Local search collection should not run for direct ChatGPT batches: ${batchIndex}`);
+  pipelineAgent.googleSearchParallelism = 6;
+  let activeGoogleSearches = 0;
+  let maxGoogleSearches = 0;
+  const pipelineProgress = [];
+  pipelineAgent.collectGoogleResultItem = async ({ item, output }) => {
+    pipelineEvents.push(`google-start-${item.position}`);
+    activeGoogleSearches += 1;
+    maxGoogleSearches = Math.max(maxGoogleSearches, activeGoogleSearches);
+    await new Promise((resolve) => setTimeout(resolve, item.position === 0 ? 60 : 5));
+    if (item.position === 3) {
+      item.websiteUrl = "";
+      item.websiteCandidates = [];
+      item.error = "simulated empty Google result";
+      for (const index of item.entry.indexes) {
+        output[index] = { ...output[index], websiteUrl: "", contactSource: "Google search skipped: simulated empty Google result" };
+      }
+      activeGoogleSearches -= 1;
+      pipelineEvents.push(`google-end-${item.position}`);
+      return item;
+    }
+    item.websiteUrl = `https://google-result-${item.position}.com/`;
+    item.websiteCandidates = [
+      item.websiteUrl,
+      `https://backup-${item.position}.com/`,
+      `https://third-${item.position}.com/`
+    ];
+    for (const index of item.entry.indexes) {
+      output[index] = { ...output[index], websiteUrl: item.websiteUrl };
+    }
+    activeGoogleSearches -= 1;
+    pipelineEvents.push(`google-end-${item.position}`);
+    return item;
   };
   pipelineAgent.processChatGPTBatch = async ({ items, batchIndex, output }) => {
     pipelineEvents.push(`gpt-start-${batchIndex}`);
     await new Promise((resolve) => setTimeout(resolve, batchIndex === 0 ? 60 : 5));
     for (const item of items) {
+      assert.match(item.websiteUrl, /^https:\/\/google-result-\d+\.com\/$/);
+      assert.equal(item.websiteCandidates.length, 3);
+      assert.equal(item.websiteCandidates[0], item.websiteUrl);
       for (const index of item.entry.indexes) {
-        output[index] = { ...output[index], websiteUrl: `https://example-${item.position}.com/` };
+        output[index] = { ...output[index], websiteUrl: item.websiteUrl, phone: `phone-${item.position}` };
       }
     }
     pipelineEvents.push(`gpt-end-${batchIndex}`);
@@ -533,13 +590,43 @@ async function main() {
   const pipelineOutput = await pipelineAgent.processRows(
     pipelineRows,
     pipelineJobDir,
-    () => {}
+    (event) => pipelineProgress.push(event)
   );
   fs.rmSync(pipelineJobDir, { recursive: true, force: true });
   assert.equal(pipelineOutput.length, 100);
+  assert.equal(pipelineOutput[3].websiteUrl, "");
+  assert.match(pipelineOutput[3].contactSource, /Google search skipped/);
+  assert.equal(maxGoogleSearches, 6);
+  assert.ok(pipelineEvents.indexOf("google-start-6") > pipelineEvents.indexOf("google-end-1"));
+  assert.ok(pipelineEvents.indexOf("gpt-start-0") < pipelineEvents.lastIndexOf("google-end-99"));
+  assert.ok(
+    pipelineEvents
+      .slice(0, pipelineEvents.indexOf("gpt-start-0"))
+      .filter((event) => event.startsWith("google-end-"))
+      .length >= 25
+  );
   assert.ok(pipelineEvents.indexOf("gpt-start-1") < pipelineEvents.indexOf("gpt-end-0"));
-  assert.ok(pipelineEvents.indexOf("gpt-start-2") < pipelineEvents.indexOf("gpt-end-0"));
-  assert.ok(pipelineEvents.indexOf("gpt-start-3") < pipelineEvents.indexOf("gpt-end-0"));
+  assert.equal(pipelineProgress.find((event) => /^Google result/.test(event.message || ""))?.processed, 0);
+  assert.equal(pipelineProgress.find((event) => /Google result .*blank/.test(event.message || ""))?.processed, 0);
+
+  const originalLaunchPersistentContext = testChromium.launchPersistentContext;
+  try {
+    const singleFlightContext = { route: async () => {}, pages: () => [], close: async () => {} };
+    let browserLaunches = 0;
+    testChromium.launchPersistentContext = async () => {
+      browserLaunches += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return singleFlightContext;
+    };
+    const singleFlightAgent = new ChatGptPlaywrightAgent();
+    singleFlightAgent.blockHeavyResources = false;
+    const contexts = await Promise.all(Array.from({ length: 6 }, () => singleFlightAgent.launchGoogle(true)));
+    assert.equal(browserLaunches, 1);
+    assert.ok(contexts.every((context) => context === singleFlightContext));
+    await singleFlightAgent.closeGoogleContext();
+  } finally {
+    testChromium.launchPersistentContext = originalLaunchPersistentContext;
+  }
 
   processed.rows[0].websiteUrl = "https://rabelink.nl/";
   processed.rows[0].email = "info@rabelink.nl";

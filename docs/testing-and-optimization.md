@@ -12,7 +12,7 @@ Tests verify:
 
 - shifted/invalid Power BI rows are rejected;
 - Playwright ChatGPT JSON contact output is parsed;
-- the Playwright ChatGPT flow preserves first-organic portal/directory URLs returned by ChatGPT;
+- the Playwright flow waits for Google candidates before sending them to ChatGPT for first-valid URL selection;
 - CSV and Excel contain exactly five columns;
 - Excel Website URL hyperlinks target the selected website, not Google search.
 
@@ -28,7 +28,7 @@ Tests verify:
 
 ## Constraints
 
-ChatGPT may return blank values when neither the first organic website nor clearly connected public sources expose contact details, or when the web account reaches a usage limit. Login and captcha remain manual. ChatGPT UI changes can require selector maintenance.
+Google search may require manual CAPTCHA solving. ChatGPT may return blank values when neither the locked website nor clearly connected public sources expose contact details, or when the web account reaches a usage limit. Login and captcha remain manual. Google/ChatGPT UI changes can require selector maintenance.
 
 ## Automated Pipeline
 

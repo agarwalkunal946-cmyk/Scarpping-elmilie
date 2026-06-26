@@ -29,12 +29,12 @@ Mac and Windows use the same npm commands. The agent handles Command+V on
 macOS and Control+V on Windows/Linux internally.
 
 Every contact lookup uses the report's captured hover Google query URL first.
-The agent sends up to 25-row strict JSON batches to ChatGPT. ChatGPT searches
-the query, locks the first valid organic website URL, then finds phone/email
-from that site or clearly connected public sources. It tries to use ChatGPT
-High mode before each batch. Workers wait when free RAM is low, cap browser
-cache, and prune old job files on Mac and Windows. Waiting rows continue
-automatically.
+The agent searches Google in 6 visible tabs, waits for up to 3
+organic website candidates, and sends every ready 25-result batch to ChatGPT.
+ChatGPT picks the first valid non-social website, then checks that site or
+clearly connected public sources for phone/email. It tries to use ChatGPT High
+mode before each batch. Workers wait when free RAM is low, cap browser cache,
+and prune old job files on Mac and Windows. Waiting rows continue automatically.
 To tune it, run the agent with CHATGPT_PARALLELISM=1..30 and keep
 CHATGPT_PARALLELISM_AUTO=true for the smooth safe limit.
 

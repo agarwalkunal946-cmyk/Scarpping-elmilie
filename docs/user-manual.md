@@ -21,21 +21,20 @@
 7. Use `Find Contacts` only if you want to rerun ChatGPT lookup.
 8. Export CSV or Excel.
 
-Normal processing runs in headless/background Chrome. A visible Chrome window opens only for ChatGPT login, and processing resumes in the background after it is solved. If `npm run agent` is stopped, the extension shows `OK` and keeps the latest saved partial rows exportable.
+Normal processing follows `.env`. With `CHATGPT_HEADLESS=false` and `GOOGLE_HEADLESS=false`, ChatGPT and Google query windows stay visible/foreground. If `npm run agent` is stopped, the extension shows `OK` and keeps the latest saved partial rows exportable.
 
 ## AI Contact Rules
 
 - Website Name is the Consignee name from Power BI.
-- Unique companies are grouped into up to 25-row ChatGPT batches with only `batch_id` and the captured hover query.
-- The agent sends each captured hover query directly to ChatGPT in one JSON-array prompt per batch.
-- Up to 4 ChatGPT batch pages can run in parallel, so 100 unique rows can run as four 25-query batches at once.
-- ChatGPT finds the first normal organic website URL for each query.
-- ChatGPT first checks that selected website/domain for email and phone; if missing, it may deep-search clearly connected public sources while keeping the Website URL unchanged.
+- The agent searches captured hover queries on Google in up to 6 visible tabs and stores up to 3 organic website candidates.
+- As soon as 25 Google result sets are ready, they are sent to ChatGPT for first-valid URL selection and phone/email extraction while later Google searches continue.
+- Up to 4 ChatGPT batch pages can run in parallel.
+- ChatGPT selects the first valid non-social/non-sponsored website candidate, then checks that selected website/domain for email and phone; if missing, it may deep-search clearly connected public sources while keeping the Website URL unchanged.
 - Missing or uncertain values remain blank.
 
 ## ChatGPT Website
 
-The automation tries to select ChatGPT `High` mode before every batch. Normal processing is headless/background; a browser is shown only for ChatGPT login or manual challenge. Model availability, limits, and results depend on that ChatGPT account.
+The automation tries to select ChatGPT `High` mode before every batch. With foreground mode enabled, ChatGPT and Google query windows stay visible. Model availability, limits, and results depend on that ChatGPT account.
 
 ## Final Columns
 
