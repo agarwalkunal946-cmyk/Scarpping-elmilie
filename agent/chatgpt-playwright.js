@@ -4,74 +4,8 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 const { chromium } = require("playwright-core");
 
-const BLOCKED_HOSTS = [
-  "google.",
-  "googleusercontent.",
-  "gstatic.",
-  "googleadservices.",
-  "doubleclick.",
-  "facebook.",
-  "instagram.",
-  "linkedin.",
-  "youtube.",
-  "x.com",
-  "twitter.",
-  "eximpedia.",
-  "tradeindata.",
-  "trademo.",
-  "trademe.",
-  "volza.",
-  "seair.",
-  "exportersindia.",
-  "exportgenius.",
-  "importgenius.",
-  "importkey.",
-  "panjiva.",
-  "zaubacorp.",
-  "tofler.",
-  "dnb.",
-  "indiamart.",
-  "tradeindia.",
-  "exporthub.",
-  "go4worldbusiness.",
-  "connect2india.",
-  "justdial.",
-  "yellowpages.",
-  "yelp.",
-  "2gis.",
-  "hidubai.",
-  "tendata.",
-  "kompass.",
-  "zoominfo.",
-  "apollo.",
-  "rocketreach.",
-  "crunchbase."
-];
-
-const NON_WEBSITE_RESULT_HOSTS = [
-  "google.",
-  "googleusercontent.",
-  "gstatic.",
-  "googleadservices.",
-  "doubleclick.",
-  "facebook.",
-  "instagram.",
-  "linkedin.",
-  "youtube.",
-  "x.com",
-  "twitter.",
-  "tiktok.",
-  "pinterest."
-];
-
-const GENERIC_PORTAL_CONTACT_HOSTS = [
-  "exportersindia.com",
-  "tendata.com",
-  "trademo.com",
-  "volza.com",
-  "panjiva.com",
-  "eximpedia.app"
-];
+const AI_PROVIDER_NAME = "ChatGPT";
+const AI_PROVIDER_URL = "https://chatgpt.com/";
 
 function loadEnv(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -106,7 +40,7 @@ function readPngInfo(filePath) {
   }
   const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   if (!header.subarray(0, 8).equals(signature)) {
-    throw new Error(`Google screenshot is not a valid PNG: ${filePath}`);
+    throw new Error(`Screenshot is not a valid PNG: ${filePath}`);
   }
   return {
     bytes: stats.size,
@@ -117,14 +51,14 @@ function readPngInfo(filePath) {
 
 function assertScreenshotReady(filePath) {
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Google screenshot was not created: ${filePath}`);
+    throw new Error(`Screenshot was not created: ${filePath}`);
   }
   const info = readPngInfo(filePath);
   if (info.bytes < 25000) {
-    throw new Error(`Google screenshot is too small to read (${info.bytes} bytes)`);
+    throw new Error(`Screenshot is too small to read (${info.bytes} bytes)`);
   }
   if (info.width < 900 || info.height < 500) {
-    throw new Error(`Google screenshot is too small to read (${info.width}x${info.height})`);
+    throw new Error(`Screenshot is too small to read (${info.width}x${info.height})`);
   }
   return info;
 }
@@ -136,29 +70,67 @@ function companyKey(row) {
   ].join("|");
 }
 
-function googleQueryUrl(row) {
-  const existing = cleanText(row.consigneeUrl);
+function safeDecodeQueryText(value) {
+  const text = String(value || "").replace(/\+/g, " ");
   try {
-    const parsed = new URL(existing);
-    if ((parsed.hostname === "google.com" || parsed.hostname.endsWith(".google.com")) && parsed.searchParams.get("q")) {
-      return parsed.href;
-    }
+    return decodeURIComponent(text);
   } catch (error) {
-    // Build a stable Google query below.
+    return text;
+  }
+}
+
+function cleanSearchQueryText(value) {
+  return cleanText(safeDecodeQueryText(value))
+    .replace(/\bVIETNAM,\s*DEMOCRATIC\s+REP\.?\s+OF\b/gi, "VIETNAM")
+    .replace(/\bVIETNAM\s+DEMOCRATIC\s+REP\s+OF\b/gi, "VIETNAM")
+    .replace(/\s*;\s*/g, " ")
+    .replace(/\b([A-Z][a-z]+)\s+Collc\b/g, "$1 Co LLC")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function googleQueryTextFromUrl(value) {
+  const text = cleanText(value);
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = new URL(text);
+    const host = parsed.hostname.toLowerCase();
+    if (!(host === "google.com" || host.endsWith(".google.com"))) {
+      return "";
+    }
+    const rawAfterQ = text.match(/[?&](?:q|query)=([^#]+)/i)?.[1] || "";
+    const rawQuery = rawAfterQ
+      ? rawAfterQ.replace(/&(?:num|hl|source|sca_esv|ei|ved|oq|aqs|sclient|uact|gs_lcp|iflsig|gbv|biw|bih|dpr|start|filter|safe|client|rlz)=.*$/i, "")
+      : (parsed.searchParams.get("q") || parsed.searchParams.get("query") || "");
+    return cleanSearchQueryText(rawQuery);
+  } catch (error) {
+    return "";
+  }
+}
+
+function googleQueryText(row) {
+  const existingQuery = googleQueryTextFromUrl(row.consigneeUrl);
+  if (existingQuery) {
+    return existingQuery;
   }
   const query = [
     cleanText(row.websiteName || row.companyName || row.consignee),
     cleanText(row.country)
   ].filter(Boolean).join(" ");
-  return "https://www.google.com/search?num=10&hl=en&q=" + encodeURIComponent(query);
+  return cleanSearchQueryText(query);
+}
+
+function googleQueryUrl(row) {
+  const query = googleQueryText(row);
+  return query ? "https://www.google.com/search?num=10&hl=en&q=" + encodeURIComponent(query) : "";
 }
 
 function isBlockedUrl(value) {
   try {
     const parsed = new URL(value);
-    const host = parsed.hostname.toLowerCase();
-    return !["http:", "https:"].includes(parsed.protocol)
-      || BLOCKED_HOSTS.some((part) => host.includes(part));
+    return !["http:", "https:"].includes(parsed.protocol);
   } catch (error) {
     return true;
   }
@@ -167,26 +139,51 @@ function isBlockedUrl(value) {
 function isNonWebsiteResultUrl(value) {
   try {
     const parsed = new URL(value);
-    const host = parsed.hostname.toLowerCase();
-    return !["http:", "https:"].includes(parsed.protocol)
-      || NON_WEBSITE_RESULT_HOSTS.some((part) => host.includes(part));
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return true;
+    }
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const blockedHosts = [
+      "google",
+      "googleusercontent",
+      "gstatic",
+      "facebook",
+      "instagram",
+      "linkedin",
+      "youtube",
+      "x.com",
+      "twitter",
+      "tiktok",
+      "pinterest"
+    ];
+    return blockedHosts.some((blocked) => (
+      blocked.includes(".")
+        ? host === blocked || host.endsWith(`.${blocked}`)
+        : host === `${blocked}.com` || host.startsWith(`${blocked}.`) || host.includes(`.${blocked}.`)
+    ));
   } catch (error) {
     return true;
   }
 }
 
-function hostIncludes(value, hosts) {
-  try {
-    const parsed = new URL(value);
-    const host = parsed.hostname.toLowerCase();
-    return hosts.some((part) => host.includes(part));
-  } catch (error) {
-    return false;
+function rawUrlText(value) {
+  const text = cleanText(value);
+  if (!text || /^none|null|n\/a$/i.test(text)) {
+    return "";
   }
+  const markdownMatch = text.match(/\]\((https?:\/\/[^)\s]+)\)/i);
+  if (markdownMatch) {
+    return markdownMatch[1].replace(/[.,;:)\]\u2190-\u21ff]+$/g, "");
+  }
+  const urlMatch = text.match(/https?:\/\/[^\s<>\])"'`]+/i);
+  if (urlMatch) {
+    return urlMatch[0].replace(/[.,;:)\]\u2190-\u21ff]+$/g, "");
+  }
+  return text;
 }
 
 function normalizeUrl(value) {
-  const text = cleanText(value);
+  const text = rawUrlText(value);
   if (!text || /^none|null|n\/a$/i.test(text)) {
     return "";
   }
@@ -204,7 +201,7 @@ function normalizeUrl(value) {
 }
 
 function normalizeFirstResultUrl(value) {
-  const text = cleanText(value);
+  const text = rawUrlText(value);
   if (!text || /^none|null|n\/a$/i.test(text)) {
     return "";
   }
@@ -218,6 +215,23 @@ function normalizeFirstResultUrl(value) {
     return parsed.href;
   } catch (error) {
     return "";
+  }
+}
+
+function sameUrl(left, right) {
+  const leftUrl = normalizeFirstResultUrl(left);
+  const rightUrl = normalizeFirstResultUrl(right);
+  return Boolean(leftUrl && rightUrl && leftUrl === rightUrl);
+}
+
+function sameSite(left, right) {
+  try {
+    const leftUrl = new URL(normalizeFirstResultUrl(left));
+    const rightUrl = new URL(normalizeFirstResultUrl(right));
+    const cleanHost = (host) => host.toLowerCase().replace(/^www\./, "");
+    return cleanHost(leftUrl.hostname) === cleanHost(rightUrl.hostname);
+  } catch (error) {
+    return false;
   }
 }
 
@@ -242,12 +256,59 @@ function normalizeFirstResultEmail(value) {
 }
 
 function normalizePhone(value) {
-  const text = cleanText(value).replace(/^tel:/i, "");
+  const text = cleanText(value)
+    .replace(/^tel:/i, "")
+    .replace(/^(phone|mobile|tel|telephone|whatsapp)\.?\s*[:：-]?\s*/i, "");
   if (/^none|null|n\/a$/i.test(text)) {
+    return "";
+  }
+  if (/[*•●·….]|\bx{2,}\b|\bhidden\b|\bmasked\b|\bprotected\b|\bpartial\b/i.test(text)) {
     return "";
   }
   const digits = text.replace(/\D/g, "");
   return digits.length >= 8 && digits.length <= 16 ? text : "";
+}
+
+function repairLooseJsonText(value) {
+  const source = String(value || "");
+  let output = "";
+  let quoted = false;
+  let escaped = false;
+  for (const char of source) {
+    if (escaped) {
+      output += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      output += char;
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      output += char;
+      continue;
+    }
+    if (quoted && (char === "\n" || char === "\r" || char === "\t")) {
+      continue;
+    }
+    output += char;
+  }
+  return output;
+}
+
+function parseJsonCandidate(value) {
+  const text = String(value || "");
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const repaired = repairLooseJsonText(text);
+    if (repaired === text) {
+      throw error;
+    }
+    return JSON.parse(repaired);
+  }
 }
 
 function parseJsonObjects(value) {
@@ -281,9 +342,56 @@ function parseJsonObjects(value) {
         depth -= 1;
         if (depth === 0) {
           try {
-            output.push(JSON.parse(source.slice(start, index + 1)));
+            output.push(parseJsonCandidate(source.slice(start, index + 1)));
           } catch (error) {
             // Continue scanning later JSON objects.
+          }
+          start = index;
+          break;
+        }
+      }
+    }
+  }
+  return output;
+}
+
+function parseJsonArrays(value) {
+  const text = String(value || "").trim();
+  const source = text;
+  const output = [];
+  for (let start = source.indexOf("["); start >= 0; start = source.indexOf("[", start + 1)) {
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const char = source[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        quoted = !quoted;
+        continue;
+      }
+      if (quoted) {
+        continue;
+      }
+      if (char === "[") {
+        depth += 1;
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const parsed = parseJsonCandidate(source.slice(start, index + 1));
+            if (Array.isArray(parsed)) {
+              output.push(parsed);
+            }
+          } catch (error) {
+            // Continue scanning later JSON arrays.
           }
           start = index;
           break;
@@ -298,7 +406,7 @@ function parseJsonObject(value) {
   return parseJsonObjects(value)[0] || {};
 }
 
-function isGeminiResult(value) {
+function isChatGPTResult(value) {
   return Boolean(
     value
     && typeof value === "object"
@@ -313,6 +421,59 @@ function isGeminiResult(value) {
       value.notes
     ].some((field) => cleanText(field))
   );
+}
+
+function isChatGPTBatchResult(value) {
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(value, key);
+  return Boolean(
+    value
+    && typeof value === "object"
+    && cleanText(value.batch_id || value.id)
+    && (hasOwn("website_url") || hasOwn("websiteUrl"))
+    && (hasOwn("phone_number") || hasOwn("phone"))
+    && hasOwn("email")
+  );
+}
+
+function orderedBatchResults(objects, expectedIds) {
+  const ids = Array.isArray(expectedIds) ? expectedIds.map(cleanText).filter(Boolean) : [];
+  if (!ids.length) {
+    return objects;
+  }
+  const byId = new Map();
+  for (const object of objects) {
+    const id = cleanText(object.batch_id || object.id);
+    if (id && !byId.has(id)) {
+      byId.set(id, object);
+    }
+  }
+  if (!ids.every((id) => byId.has(id))) {
+    return [];
+  }
+  return ids.map((id) => byId.get(id));
+}
+
+function parseChatGPTBatchResults(value, expectedCount = 0, expectedIds = []) {
+  const arrays = parseJsonArrays(value);
+  const minimum = Math.max(1, Math.floor(Number(expectedCount || 0)) || 1);
+  for (const array of arrays.reverse()) {
+    const objects = array.filter(isChatGPTBatchResult);
+    const ordered = orderedBatchResults(objects, expectedIds);
+    if (ordered.length >= minimum) {
+      return expectedCount ? ordered.slice(0, expectedCount) : ordered;
+    }
+    if (!expectedIds.length && objects.length >= minimum) {
+      return expectedCount ? objects.slice(0, expectedCount) : objects;
+    }
+  }
+  const objects = parseJsonObjects(value).filter(isChatGPTBatchResult);
+  const ordered = orderedBatchResults(objects, expectedIds);
+  if (ordered.length >= minimum) {
+    return expectedCount ? ordered.slice(0, expectedCount) : ordered;
+  }
+  return !expectedIds.length && objects.length >= minimum
+    ? (expectedCount ? objects.slice(0, expectedCount) : objects)
+    : [];
 }
 
 function normalizedResult(parsed, row, sourceUrl) {
@@ -341,69 +502,60 @@ function normalizedFirstResult(parsed, row, sourceUrl) {
   };
 }
 
-function organicResultsText(results) {
-  if (!results.length) {
-    return "No non-sponsored organic results were extracted.";
-  }
-  return results.map((result) => [
-    `Rank ${result.rank}: ${cleanText(result.title) || "(no title)"}`,
-    `URL: ${result.url}`,
-    `Snippet: ${cleanText(result.snippet).slice(0, 650) || "(no snippet)"}`
-  ].join("\n")).join("\n\n");
+function batchId(position) {
+  return `Q${String(position + 1).padStart(3, "0")}`;
 }
 
-function contactCandidatesText(candidates) {
-  if (!candidates.length) {
-    return "No visible contact candidates were extracted from the organic result pages.";
-  }
-  return candidates.map((candidate, index) => [
-    `Candidate ${index + 1}: ${candidate.type.toUpperCase()} ${candidate.value}`,
-    `Source rank: ${candidate.rank}`,
-    `Source URL: ${candidate.source_url}`,
-    `Evidence: ${cleanText(candidate.evidence).slice(0, 350)}`
-  ].join("\n")).join("\n\n");
-}
+function batchResultPrompt(items) {
+  const inputJson = JSON.stringify(items.map((item) => ({
+    batch_id: item.batchId,
+    query: item.queryText
+  })), null, 2);
 
-function resultPrompt(row, queryUrl, organicResults = [], contactCandidates = []) {
-  const company = cleanText(row.websiteName || row.companyName || row.consignee);
-  const country = cleanText(row.country);
-  const firstOrganicUrl = organicResults[0]?.url || "";
   return [
-    "The Google organic search results below were extracted from the exact trade-report query URL.",
-    "Use the Google query URL and the extracted results exactly. Do not rebuild a new search from other columns.",
-    "Your job is to extract contact data from Rank 1, the FIRST non-sponsored organic result in the list.",
-    "Ignore sponsored/ad results. The list is already ordered top-to-bottom from Google organic results.",
-    "Use Rank 1 as the target when it matches the same company/listing. If Rank 1 is clearly unrelated, use the next rank that matches and explain that in notes.",
-    "Return website_url as that first result page URL itself. Do not replace it with a later result, a guessed official website, or a different domain.",
-    "Do not reject import/export portals, trade-data sites, directories, marketplaces, or profile pages when they are the first non-sponsored result. Use the first result page as the source.",
-    "Reject only sponsored ads, Google redirect/cache pages, social networks, map listings, and unrelated similarly named companies.",
-    "Open/check the first result page and extract only the email and phone shown for the same company/listing on that page or a direct details/contact page linked from that same first-result site.",
-    "If Rank 1 hides or masks contact details, use the contact candidates below from the extracted top organic result pages, but only when the source page is clearly for the same company/listing.",
-    "If the contact candidates are empty or only masked, perform focused web searches for the exact company name plus phone, email, contact, WhatsApp, 2GIS, and HiDubai before returning blanks.",
-    "You may accept a full phone/email from a local business listing such as 2GIS or HiDubai when the listing name and country/address match the same company, even if website_url remains Rank 1.",
-    "Prefer full phone numbers from tel: links, WhatsApp links, or visible contact sections over masked text such as '+971 52213...'.",
-    "Do not use generic portal support/sales/corporate numbers from site headers or footers, including ExportersIndia, Tendata, Volza, Panjiva, Trademo, or Eximpedia support numbers.",
-    "Do not invent a phone/email and never complete a masked or partially hidden number.",
-    "If no full same-company email or phone is visible in Rank 1 or the contact candidates, use an empty string for that field.",
-    "Always set company_name to the Company value, even when every contact field is blank.",
-    "The notes field must briefly say which first result URL was used and which source provided each contact field.",
-    "Return ONLY one JSON object with exactly these keys:",
-    '{"company_name":"","website_url":"","phone_number":"","email":"","source_url":"","confidence":0,"notes":""}',
-    `Company: ${company}`,
-    `Country: ${country}`,
-    `HSN Code: ${cleanText(row.hsCode)}`,
-    `Google query URL: ${queryUrl}`,
-    `Rank 1 organic result URL: ${firstOrganicUrl || "none"}`,
-    "Extracted Google organic results:",
-    organicResultsText(organicResults),
-    "Extracted contact candidates from organic result pages:",
-    contactCandidatesText(contactCandidates)
+    "Find the first Google organic website URL, then scrape that selected website/domain for phone and email.",
+    "Return ONLY one valid JSON array. No markdown, no prose, no code fences, no extra text.",
+    `The array must contain exactly ${items.length} objects, in the same order as the inputs.`,
+    "Every object must use exactly these keys:",
+    '{"batch_id":"","website_url":"","phone_number":"","email":""}',
+    "Rules:",
+    "- Never refuse, apologize, explain limitations, or say you cannot browse. If a field cannot be verified, return an empty string for that field and still return JSON.",
+    "- Copy batch_id exactly.",
+    "- Search the exact query like a normal Google search.",
+    "- Read results top to bottom and pick the first real organic website/page URL.",
+    "- Skip ads, maps/local pack, AI answers, Google-owned pages, social profiles, and video pages like LinkedIn, Facebook, Instagram, YouTube, X/Twitter, TikTok, Pinterest.",
+    "- Do not pick a nicer, official, cleaner, related, or later URL. website_url must be the first valid organic result.",
+    "- Lock website_url. Never change it while finding phone/email.",
+    "- Before returning phone/email, fully scrape/crawl the selected website_url domain first. Do not stop at only the selected page.",
+    "- Check the full selected website/domain: selected page, homepage, header, footer, visible text, tables, FAQ, buttons, mailto/tel links, page source snippets, sitemap, and same-domain contact/about/location/branch/support/inquiry/privacy/terms pages.",
+    "- Follow same-domain navigation/footer/contact links that may contain phone/email. Finish this website/domain scrape before using deep-search.",
+    "- If website_url is a portal, directory, company profile, listing, marketplace, trade-data page, or generic website page, use any complete phone/email visible on that selected URL/domain, including footer/support/site-owner contact. It is valid because it belongs to website_url/domain.",
+    "- Only if phone/email is not found after full website_url/domain scraping, then deep-search/web-search exact website_url, domain, page title, and company/listing name with phone/email/contact.",
+    "- Use deep-search contact only when it clearly belongs to the same website_url/domain/company/listing. Keep website_url unchanged.",
+    "- Never use contact from an unrelated domain or unrelated company. Never guess.",
+    "- If website_url is not found, return empty strings for website_url, phone_number, and email.",
+    "- If phone or email is not found after website scraping plus deep/web search, use an empty string for that field.",
+    "- Phone/email must be complete and readable. No hidden, partial, masked, protected, guessed, or placeholder values.",
+    "- Use raw URLs only. Do not wrap URLs in markdown. Do not add extra keys.",
+    "Input JSON:",
+    inputJson
   ].join("\n");
 }
 
 async function findPromptBox(page) {
   const selectors = [
+    '[data-testid="prompt-textarea"]',
+    '#prompt-textarea',
+    '.ProseMirror[contenteditable="true"]',
+    '[data-lexical-editor="true"]',
+    '[contenteditable="plaintext-only"]',
+    '[contenteditable="true"][data-placeholder*="Ask" i]',
+    '[contenteditable="true"][aria-placeholder*="Ask" i]',
+    '[contenteditable="true"][aria-label*="Ask" i]',
+    '[role="textbox"][contenteditable="true"]',
     'textarea[placeholder*="Ask"]',
+    'textarea[aria-label*="Ask" i]',
+    '[aria-label="Chat with ChatGPT"]',
     'textarea[aria-label*="prompt" i]',
     '[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"]'
@@ -415,6 +567,16 @@ async function findPromptBox(page) {
     }
   }
   return null;
+}
+
+async function isLikelyChatGptLoginPage(page) {
+  const url = page.url();
+  if (/auth\.openai\.com|\/auth\/login|\/login/i.test(url)) {
+    return true;
+  }
+  const bodyText = await page.locator("body").innerText({ timeout: 2500 }).catch(() => "");
+  return /\b(log in|sign in|sign up|continue with google|continue with microsoft)\b/i.test(bodyText)
+    && !/\b(new chat|ask anything|message chatgpt)\b/i.test(bodyText);
 }
 
 async function clickPromptBox(page, errorMessage) {
@@ -436,325 +598,12 @@ async function clickPromptBox(page, errorMessage) {
   throw new Error(lastError ? cleanText(lastError.message || lastError) : errorMessage);
 }
 
-async function dismissGoogleConsent(page) {
-  const buttons = [
-    page.getByRole("button", { name: /accept all/i }),
-    page.getByRole("button", { name: /i agree/i }),
-    page.getByRole("button", { name: /agree/i })
-  ];
-  for (const button of buttons) {
-    if (await button.count() && await button.first().isVisible().catch(() => false)) {
-      await button.first().click().catch(() => {});
-      break;
-    }
-  }
-}
-
-async function firstOrganicGoogleUrl(page) {
-  const results = await googleOrganicResults(page, 1);
-  return results[0]?.url || "";
-}
-
-async function googleOrganicResults(page, limit = 15) {
-  const rawResults = await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const unwrap = (href) => {
-      try {
-        const parsed = new URL(href, window.location.href);
-        if (parsed.hostname.includes("google.") && parsed.pathname === "/url") {
-          return parsed.searchParams.get("q") || parsed.searchParams.get("url") || href;
-        }
-        return parsed.href;
-      } catch (error) {
-        return href || "";
-      }
-    };
-    const sponsoredSelector = [
-      "[data-text-ad]",
-      "[aria-label*='Ads']",
-      "[aria-label*='Sponsored']",
-      "[data-rw]",
-      "[data-ta-slot]"
-    ].join(",");
-    const output = [];
-    const seen = new Set();
-    for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-      const titleElement = anchor.querySelector("h3");
-      if (!titleElement || anchor.closest(sponsoredSelector)) {
-        continue;
-      }
-      const url = unwrap(anchor.href || anchor.getAttribute("href") || "");
-      const title = clean(titleElement.innerText || anchor.innerText);
-      if (!url || !title || seen.has(url)) {
-        continue;
-      }
-      seen.add(url);
-      let container = titleElement;
-      let bestText = "";
-      for (let depth = 0; depth < 9 && container; depth += 1) {
-        const text = clean(container.innerText || container.textContent || "");
-        if (text.includes(title)
-          && text.length > bestText.length
-          && text.length < 1800
-          && !/people also ask|related searches/i.test(text)) {
-          bestText = text;
-        }
-        container = container.parentElement;
-      }
-      const snippet = bestText
-        .replace(title, "")
-        .replace(url, "")
-        .replace(/\b(?:http|https):\/\/\S+/gi, "")
-        .replace(/\s+/g, " ")
-        .trim();
-      output.push({ title, url, snippet });
-    }
-    return output;
-  });
-  const results = [];
-  const seen = new Set();
-  for (const result of rawResults) {
-    const url = normalizeFirstResultUrl(result.url);
-    if (!url || seen.has(url) || isNonWebsiteResultUrl(url)) {
-      continue;
-    }
-    seen.add(url);
-    results.push({
-      rank: results.length + 1,
-      title: cleanText(result.title),
-      url,
-      snippet: cleanText(result.snippet)
-    });
-    if (results.length >= limit) {
-      break;
-    }
-  }
-  return results;
-}
-
-function normalizeCandidatePhone(value) {
-  const text = cleanText(value);
-  if (!text || /\.\.\.|(?:19|20)\d{2}[-/]\d{1,2}[-/]\d{1,2}|\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(text)) {
-    return "";
-  }
-  const digits = text.replace(/\D/g, "");
-  if (digits.length < 8 || digits.length > 16) {
-    return "";
-  }
-  if (/^\+/.test(text)) {
-    return text;
-  }
-  return text;
-}
-
-function phoneFromHref(href) {
-  const text = cleanText(href);
-  if (!text) {
-    return "";
-  }
-  try {
-    const parsed = new URL(text, "https://example.com/");
-    if (parsed.protocol === "tel:") {
-      return normalizeCandidatePhone(decodeURIComponent(parsed.pathname));
-    }
-    if (parsed.hostname.includes("wa.me")) {
-      const digits = parsed.pathname.replace(/\D/g, "");
-      return digits.length >= 8 && digits.length <= 16 ? `+${digits}` : "";
-    }
-    if (parsed.hostname.includes("api.whatsapp.com") || parsed.hostname.includes("whatsapp.com")) {
-      const digits = String(parsed.searchParams.get("phone") || "").replace(/\D/g, "");
-      return digits.length >= 8 && digits.length <= 16 ? `+${digits}` : "";
-    }
-  } catch (error) {
-    // Regex fallback below.
-  }
-  const match = text.match(/(?:phone=|wa\.me\/)(\+?\d{8,16})/i);
-  return match ? `+${match[1].replace(/\D/g, "")}` : "";
-}
-
-function addContactCandidate(candidates, seen, candidate) {
-  const type = cleanText(candidate.type).toLowerCase();
-  const value = type === "email"
-    ? normalizeFirstResultEmail(candidate.value)
-    : normalizeCandidatePhone(candidate.value);
-  if (!type || !value) {
-    return;
-  }
-  const evidence = cleanText(candidate.evidence);
-  const sourceUrl = normalizeFirstResultUrl(candidate.source_url);
-  if (!sourceUrl) {
-    return;
-  }
-  const lowEvidence = evidence.toLowerCase();
-  const lowUrl = sourceUrl.toLowerCase();
-  const digits = value.replace(/\D/g, "");
-  const sourceDigits = sourceUrl.replace(/\D/g, "");
-  if (type === "phone" && (
-    /\b(ip|utc|robot|captcha|suspicious|verify|verification|error|access denied)\b/i.test(evidence)
-    || (digits.length >= 8 && sourceDigits.includes(digits))
-    || (!/^\+/.test(value) && !/\b(phone|mobile|tel|telephone|whatsapp|contact|call)\b/i.test(evidence))
-    || (hostIncludes(sourceUrl, GENERIC_PORTAL_CONTACT_HOSTS)
-      && /\b(sales|support|pre-sales|after-sale|consulting|customer relationship|franchise|copyright|icp|public network security|tendata|exportersindia|weblink\.in|purchase a full-year plan)\b/i.test(evidence))
-  )) {
-    return;
-  }
-  if (type === "phone"
-    && /exportersindia\.com/.test(lowUrl)
-    && (/^\+?91\b/.test(value) || /\b(sales|support|for help|post buy requirement|my exportersindia|weblink\.in)\b/.test(lowEvidence))) {
-    return;
-  }
-  const key = `${type}|${value}|${sourceUrl}`;
-  if (seen.has(key)) {
-    return;
-  }
-  seen.add(key);
-  candidates.push({
-    type,
-    value,
-    rank: Number(candidate.rank || 0),
-    source_url: sourceUrl,
-    evidence
-  });
-}
-
-function trustedFallbackCandidate(candidate) {
-  if (!candidate || !candidate.source_url) {
-    return false;
-  }
-  if (hostIncludes(candidate.source_url, GENERIC_PORTAL_CONTACT_HOSTS)) {
-    return false;
-  }
-  return !/\b(rejected|support|sales|copyright|icp|public network security|captcha|robot|ip:)\b/i.test(candidate.evidence || "");
-}
-
 function shouldClearRejectedContact(result) {
   const notes = cleanText(result.notes).toLowerCase();
-  return /\b(rejected|generic|support|corporate|not specific|not tied|not verified|not originate|portal support)\b/.test(notes);
-}
-
-async function extractPageContactCandidates(page, result) {
-  const pageCandidates = await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const contextFor = (element) => {
-      let current = element;
-      for (let depth = 0; depth < 4 && current; depth += 1) {
-        const text = clean(current.innerText || current.textContent || "");
-        if (text.length >= 12) {
-          return text.slice(0, 500);
-        }
-        current = current.parentElement;
-      }
-      return clean(element.innerText || element.textContent || element.getAttribute("href") || "");
-    };
-    const output = [];
-    for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-      const href = anchor.getAttribute("href") || "";
-      const text = clean(anchor.innerText || anchor.textContent || href);
-      if (/^mailto:/i.test(href)) {
-        output.push({ type: "email", value: href.replace(/^mailto:/i, "").split("?")[0], evidence: contextFor(anchor) });
-      }
-      if (/^tel:/i.test(href) || /wa\.me\/|whatsapp\.com/i.test(href)) {
-        output.push({ type: "phone", value: href, evidence: contextFor(anchor) || text });
-      }
-    }
-    const bodyText = clean(document.body?.innerText || "");
-    const emailMatches = bodyText.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi) || [];
-    for (const email of emailMatches.slice(0, 12)) {
-      const index = bodyText.toLowerCase().indexOf(email.toLowerCase());
-      output.push({
-        type: "email",
-        value: email,
-        evidence: bodyText.slice(Math.max(0, index - 120), index + email.length + 120)
-      });
-    }
-    const phoneMatches = bodyText.match(/(?:\+\d{1,3}[\s().-]*)?(?:\d[\s().-]*){8,15}\d/g) || [];
-    for (const phone of phoneMatches.slice(0, 20)) {
-      const compact = phone.replace(/\D/g, "");
-      if (compact.length < 8 || compact.length > 16) {
-        continue;
-      }
-      const index = bodyText.indexOf(phone);
-      output.push({
-        type: "phone",
-        value: phone,
-        evidence: bodyText.slice(Math.max(0, index - 140), index + phone.length + 140)
-      });
-    }
-    return output;
-  }).catch(() => []);
-  return pageCandidates.map((candidate) => ({
-    ...candidate,
-    rank: result.rank,
-    source_url: result.url,
-    value: candidate.type === "phone" ? (phoneFromHref(candidate.value) || candidate.value) : candidate.value
-  }));
-}
-
-async function collectContactCandidates(context, organicResults, onProgress = () => {}, reusablePage = null) {
-  const candidates = [];
-  const seen = new Set();
-  const page = reusablePage || await context.newPage();
-  try {
-    for (const result of organicResults.slice(0, 8)) {
-      onProgress(result);
-      const snippetText = `${result.title}\n${result.url}\n${result.snippet}`;
-      const snippetEmails = snippetText.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi) || [];
-      for (const email of snippetEmails) {
-        addContactCandidate(candidates, seen, {
-          type: "email",
-          value: email,
-          rank: result.rank,
-          source_url: result.url,
-          evidence: `Google result snippet: ${result.snippet}`
-        });
-      }
-      const snippetPhones = snippetText.match(/(?:\+\d{1,3}[\s().-]*)?(?:\d[\s().-]*){8,15}\d/g) || [];
-      for (const phone of snippetPhones) {
-        addContactCandidate(candidates, seen, {
-          type: "phone",
-          value: phone,
-          rank: result.rank,
-          source_url: result.url,
-          evidence: `Google result snippet: ${result.snippet}`
-        });
-      }
-      try {
-        await page.goto(result.url, { waitUntil: "domcontentloaded", timeout: 12000 });
-        await page.waitForTimeout(900);
-        const pageCandidates = await extractPageContactCandidates(page, result);
-        for (const candidate of pageCandidates) {
-          addContactCandidate(candidates, seen, candidate);
-        }
-      } catch (error) {
-        // Some result pages block automation; snippets and remaining pages still help.
-      }
-      if (candidates.filter((candidate) => candidate.type === "phone").length >= 3
-        && candidates.filter((candidate) => candidate.type === "email").length >= 2) {
-        break;
-      }
-    }
-  } finally {
-    if (!reusablePage) {
-      await page.close().catch(() => {});
-    }
-  }
-  return candidates.slice(0, 16);
-}
-
-async function captureGoogleScreenshot(page, screenshotPath) {
-  await page.setViewportSize({ width: 1600, height: 1000 }).catch(() => {});
-  await page.locator("body").waitFor({ state: "visible", timeout: 15000 });
-  await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
-  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-  await page.waitForTimeout(700);
-  await page.screenshot({
-    path: screenshotPath,
-    fullPage: false,
-    animations: "disabled",
-    caret: "hide",
-    scale: "css"
-  });
-  return assertScreenshotReady(screenshotPath);
+  const badContact = "rejected|generic|support|corporate|not specific|not tied|not verified|not originate|portal support|not target company|not the target|portal owner|directory owner";
+  return new RegExp(`\\b(returned|output|selected)\\s+(phone|email|contact|value)\\b.{0,80}\\b(${badContact})\\b`).test(notes)
+    || new RegExp(`\\b(phone|email|contact|value)\\b\\s+(is|was|appears|seems|looks)\\b.{0,80}\\b(${badContact})\\b`).test(notes)
+    || /\bdo not use\b.{0,40}\b(phone|email|contact|value)\b/.test(notes);
 }
 
 function pasteShortcut() {
@@ -882,7 +731,7 @@ async function waitForAttachmentReady(page, beforeSignal, timeoutMs = 20000) {
     }
     await page.waitForTimeout(500);
   }
-  throw new Error("Gemini did not show a ready screenshot attachment");
+  throw new Error("ChatGPT did not show a ready screenshot attachment");
 }
 
 async function promptRoot(box) {
@@ -954,7 +803,7 @@ async function setScreenshotOnExistingFileInput(page, screenshotPath, beforeSign
     await input.setInputFiles(screenshotPath);
     return waitForAttachmentReady(page, beforeSignal, 18000);
   }
-  throw new Error("No Gemini image file input was available");
+  throw new Error("No ChatGPT image file input was available");
 }
 
 async function openUploadMenu(page) {
@@ -976,7 +825,7 @@ async function openUploadMenu(page) {
       return null;
     }
   }
-  throw new Error("Gemini upload button was not found");
+  throw new Error("ChatGPT upload button was not found");
 }
 
 async function uploadScreenshotFromMenu(page, screenshotPath, beforeSignal) {
@@ -1011,7 +860,7 @@ async function uploadScreenshotFromMenu(page, screenshotPath, beforeSignal) {
 
 async function pasteScreenshot(page, screenshotPath, debugBasePath) {
   assertScreenshotReady(screenshotPath);
-  const box = await clickPromptBox(page, "Gemini prompt box not found before screenshot paste");
+  const box = await clickPromptBox(page, "ChatGPT prompt box not found before screenshot paste");
   const origin = new URL(page.url()).origin;
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin }).catch(() => {});
   const base64 = fs.readFileSync(screenshotPath).toString("base64");
@@ -1074,7 +923,7 @@ async function pasteScreenshot(page, screenshotPath, debugBasePath) {
       await page.screenshot({ path: `${debugBasePath}-screenshot-attach-failed.png`, fullPage: true }).catch(() => {});
       fs.writeFileSync(`${debugBasePath}-screenshot-attach-failed.html`, await page.content().catch(() => ""));
     }
-    throw new Error(`Gemini screenshot attachment failed. ${attempts.join(" | ")}`);
+    throw new Error(`ChatGPT screenshot attachment failed. ${attempts.join(" | ")}`);
   }
   return signal;
 }
@@ -1083,7 +932,7 @@ async function fillPrompt(page, prompt) {
   let lastError = null;
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      const box = await clickPromptBox(page, "Gemini prompt box not found. Complete login in the Playwright Chrome window.");
+      const box = await clickPromptBox(page, "ChatGPT prompt box not found. Complete login in the Playwright Chrome window.");
       const tagName = await box.evaluate((element) => element.tagName);
       if (tagName === "TEXTAREA") {
         await box.fill(prompt, { timeout: 8000 });
@@ -1101,13 +950,13 @@ async function fillPrompt(page, prompt) {
       if (cleanText(written).includes(cleanText(prompt).slice(-80))) {
         return;
       }
-      throw new Error("Gemini prompt text was not fully written");
+      throw new Error("ChatGPT prompt text was not fully written");
     } catch (error) {
       lastError = error;
       await page.waitForTimeout(800);
     }
   }
-  throw new Error(`Gemini prompt fill failed: ${cleanText(lastError?.message || lastError)}`);
+  throw new Error(`ChatGPT prompt fill failed: ${cleanText(lastError?.message || lastError)}`);
 }
 
 async function ensureScreenshotStillAttached(page, attachedSignal, debugBasePath) {
@@ -1119,7 +968,7 @@ async function ensureScreenshotStillAttached(page, attachedSignal, debugBasePath
       await page.screenshot({ path: `${debugBasePath}-screenshot-missing-before-send.png`, fullPage: true }).catch(() => {});
       fs.writeFileSync(`${debugBasePath}-screenshot-missing-before-send.html`, await page.content().catch(() => ""));
     }
-    throw new Error("Screenshot attachment disappeared before Gemini send");
+    throw new Error("Screenshot attachment disappeared before ChatGPT send");
   }
 }
 
@@ -1161,7 +1010,7 @@ async function findSendButton(page, box) {
 }
 
 async function sendPrompt(page, prompt, debugBasePath, attachedSignal) {
-  const box = await clickPromptBox(page, "Gemini prompt box not found before send.");
+  const box = await clickPromptBox(page, "ChatGPT prompt box not found before send.");
   if (attachedSignal) {
     await ensureScreenshotStillAttached(page, attachedSignal, debugBasePath);
   }
@@ -1178,52 +1027,43 @@ async function sendPrompt(page, prompt, debugBasePath, attachedSignal) {
     ? await box.inputValue().catch(() => "")
     : await box.innerText().catch(() => "");
   if (cleanText(remaining).includes(cleanText(prompt).slice(-80))) {
-    const retryButton = await findSendButton(page, box);
-    if (retryButton) {
-      if (attachedSignal) {
-        await ensureScreenshotStillAttached(page, attachedSignal, debugBasePath);
-      }
-      await retryButton.click();
-      await page.waitForTimeout(2200);
-      remaining = tagName === "TEXTAREA"
-        ? await box.inputValue().catch(() => "")
-        : await box.innerText().catch(() => "");
-    }
-  }
-  if (cleanText(remaining).includes(cleanText(prompt).slice(-80))) {
     if (debugBasePath) {
-      await page.screenshot({ path: `${debugBasePath}-gemini-send-failed.png`, fullPage: true }).catch(() => {});
-      fs.writeFileSync(`${debugBasePath}-gemini-send-failed.html`, await page.content().catch(() => ""));
+      await page.screenshot({ path: `${debugBasePath}-chatgpt-send-failed.png`, fullPage: true }).catch(() => {});
+      fs.writeFileSync(`${debugBasePath}-chatgpt-send-failed.html`, await page.content().catch(() => ""));
     }
-    throw new Error("Gemini prompt was filled, but the Send button was not activated");
+    throw new Error("ChatGPT prompt was filled, but the Send button was not activated");
   }
 }
 
-async function waitForGeminiJson(page, timeoutMs, debugBasePath) {
+async function waitForChatGPTJson(page, timeoutMs, debugBasePath) {
   const deadline = Date.now() + timeoutMs;
   let lastText = "";
   let stableSince = 0;
   while (Date.now() < deadline) {
     const blocks = await page.locator("pre, code").allTextContents().catch(() => []);
     for (const candidate of [...blocks].reverse()) {
-      const parsed = parseJsonObjects(candidate).reverse().find(isGeminiResult);
+      const parsed = parseJsonObjects(candidate).reverse().find(isChatGPTResult);
       if (parsed) {
         return parsed;
       }
     }
     const mainText = await page.locator("body").innerText().catch(() => "");
-    const blockingMessage = geminiBlockingMessage(mainText);
+    const blockingMessage = chatgptBlockingMessage(mainText);
     if (blockingMessage) {
       if (debugBasePath) {
-        await page.screenshot({ path: `${debugBasePath}-gemini-blocked.png`, fullPage: true }).catch(() => {});
-        fs.writeFileSync(`${debugBasePath}-gemini-blocked.txt`, mainText);
+        await page.screenshot({ path: `${debugBasePath}-chatgpt-blocked.png`, fullPage: true }).catch(() => {});
+        fs.writeFileSync(`${debugBasePath}-chatgpt-blocked.txt`, mainText);
       }
       throw new Error(blockingMessage);
     }
+    const immediateParsed = parseJsonObjects(mainText.slice(-40000)).reverse().find(isChatGPTResult);
+    if (immediateParsed) {
+      return immediateParsed;
+    }
     if (mainText && mainText === lastText) {
       stableSince = stableSince || Date.now();
-      if (Date.now() - stableSince > 3500) {
-        const parsed = parseJsonObjects(mainText.slice(-20000)).reverse().find(isGeminiResult);
+      if (Date.now() - stableSince > 900) {
+        const parsed = parseJsonObjects(mainText.slice(-20000)).reverse().find(isChatGPTResult);
         if (parsed) {
           return parsed;
         }
@@ -1232,27 +1072,72 @@ async function waitForGeminiJson(page, timeoutMs, debugBasePath) {
       lastText = mainText;
       stableSince = 0;
     }
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(350);
   }
   if (debugBasePath) {
-    fs.writeFileSync(`${debugBasePath}-gemini-timeout.txt`, lastText);
+    fs.writeFileSync(`${debugBasePath}-chatgpt-timeout.txt`, lastText);
   }
-  throw new Error("Gemini JSON response timed out");
+  throw new Error("ChatGPT JSON response timed out");
 }
 
-function geminiBlockingMessage(value) {
+async function waitForChatGPTBatchJson(page, expectedCount, timeoutMs, debugBasePath, expectedIds = []) {
+  const deadline = Date.now() + timeoutMs;
+  let lastText = "";
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const blocks = await page.locator("pre, code").allTextContents().catch(() => []);
+    for (const candidate of [...blocks].reverse()) {
+      const parsed = parseChatGPTBatchResults(candidate, expectedCount, expectedIds);
+      if (parsed.length) {
+        return parsed;
+      }
+    }
+    const mainText = await page.locator("body").innerText().catch(() => "");
+    const blockingMessage = chatgptBlockingMessage(mainText);
+    if (blockingMessage) {
+      if (debugBasePath) {
+        await page.screenshot({ path: `${debugBasePath}-chatgpt-blocked.png`, fullPage: true }).catch(() => {});
+        fs.writeFileSync(`${debugBasePath}-chatgpt-blocked.txt`, mainText);
+      }
+      throw new Error(blockingMessage);
+    }
+    const immediateParsed = parseChatGPTBatchResults(mainText.slice(-120000), expectedCount, expectedIds);
+    if (immediateParsed.length) {
+      return immediateParsed;
+    }
+    if (mainText && mainText === lastText) {
+      stableSince = stableSince || Date.now();
+      if (Date.now() - stableSince > 900) {
+        const parsed = parseChatGPTBatchResults(mainText.slice(-60000), expectedCount, expectedIds);
+        if (parsed.length) {
+          return parsed;
+        }
+      }
+    } else {
+      lastText = mainText;
+      stableSince = 0;
+    }
+    await page.waitForTimeout(350);
+  }
+  if (debugBasePath) {
+    fs.writeFileSync(`${debugBasePath}-chatgpt-batch-timeout.txt`, lastText);
+  }
+  throw new Error("ChatGPT batch JSON response timed out");
+}
+
+function chatgptBlockingMessage(value) {
   const text = String(value || "").slice(-16000);
   if (!text) {
     return "";
   }
   if (/you(?:'| a)?ve reached (?:your )?(?:limit|usage limit)|rate limit|too many requests|quota exceeded|try again later/i.test(text)) {
-    return "Gemini limit reached or rate limited";
+    return "ChatGPT limit reached or rate limited";
   }
   if (/storage (?:is )?full|not enough storage|data (?:is )?full|browser data full/i.test(text)) {
-    return "Gemini browser storage/data is full";
+    return "ChatGPT browser storage/data is full";
   }
   if (/something went wrong|server error|couldn(?:'|\u2019)?t complete|response stopped|failed to generate/i.test(text)) {
-    return "Gemini showed a server/response error";
+    return "ChatGPT showed a server/response error";
   }
   return "";
 }
@@ -1271,6 +1156,108 @@ function booleanEnv(name, fallback) {
     return fallback;
   }
   return ["1", "true", "yes", "on"].includes(value);
+}
+
+function isChatGptUiUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "chatgpt.com"
+      || host.endsWith(".chatgpt.com")
+      || host === "openai.com"
+      || host.endsWith(".openai.com")
+      || host === "oaistatic.com"
+      || host.endsWith(".oaistatic.com")
+      || host === "oaiusercontent.com"
+      || host.endsWith(".oaiusercontent.com");
+  } catch (error) {
+    return false;
+  }
+}
+
+async function selectChatGptHighMode(page) {
+  const opened = await page.evaluate(() => {
+    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const modeText = /^(auto|fast|standard|instant|medium|high)$/i;
+    const visible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.visibility !== "hidden"
+        && style.display !== "none"
+        && rect.width > 8
+        && rect.height > 8;
+    };
+    const prompt = document.querySelector([
+      '[data-testid="prompt-textarea"]',
+      'textarea[placeholder*="Ask"]',
+      '[aria-label="Chat with ChatGPT"]',
+      '[contenteditable="true"]'
+    ].join(","));
+    let root = prompt?.closest("form") || prompt?.parentElement || document;
+    for (let depth = 0; depth < 5 && root?.parentElement; depth += 1) {
+      const buttons = Array.from(root.querySelectorAll("button,[role='button']"));
+      if (buttons.some((button) => visible(button) && modeText.test(clean(button.innerText || button.textContent)))) {
+        break;
+      }
+      root = root.parentElement;
+    }
+    const buttons = Array.from(root.querySelectorAll("button,[role='button']"))
+      .filter(visible)
+      .filter((button) => {
+        const text = clean(button.innerText || button.textContent);
+        const label = clean(button.getAttribute("aria-label") || button.getAttribute("title") || "");
+        const meta = `${text} ${label}`;
+        if (/send|microphone|voice|attach|file|image|plus|\+|tools/i.test(meta)) {
+          return false;
+        }
+        return modeText.test(text) || /\b(reason|reasoning|thinking|mode|effort|model)\b/i.test(label);
+      });
+    if (buttons.some((button) => /(^|\s)high(\s|$)/i.test(clean(button.innerText || button.textContent)))) {
+      return "already";
+    }
+    const control = buttons.find((button) => /^(auto|fast|standard|instant|medium)$/i.test(clean(button.innerText || button.textContent)))
+      || buttons.find((button) => /\b(reason|reasoning|thinking|mode|effort|model)\b/i.test(clean(button.getAttribute("aria-label") || button.getAttribute("title") || "")));
+    if (!control) {
+      return "";
+    }
+    control.click();
+    return "opened";
+  }).catch(() => "");
+
+  if (opened === "already") {
+    return "High";
+  }
+  if (!opened) {
+    return "";
+  }
+  await page.waitForTimeout(700);
+  const selected = await page.evaluate(() => {
+    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.visibility !== "hidden"
+        && style.display !== "none"
+        && rect.width > 8
+        && rect.height > 8;
+    };
+    const candidates = Array.from(document.querySelectorAll([
+      "button",
+      "[role='button']",
+      "[role='menuitem']",
+      "[role='option']"
+    ].join(",")));
+    const high = candidates.find((element) => visible(element) && /^high$/i.test(clean(element.innerText || element.textContent)));
+    if (!high) {
+      return false;
+    }
+    high.click();
+    return true;
+  }).catch(() => false);
+  if (selected) {
+    await page.waitForTimeout(500);
+    return "High";
+  }
+  return "";
 }
 
 function clearProfileCaches(profileDir) {
@@ -1412,7 +1399,7 @@ async function googleCaptchaMessage(page) {
   }
   const bodyText = await page.locator("body").innerText({ timeout: 2500 }).catch(() => "");
   if (isSorryUrl || /our systems have detected unusual traffic|i'?m not a robot|recaptcha|google automatically detects requests/i.test(bodyText)) {
-    return "Google CAPTCHA/rate limit detected. Slow down or wait before retrying.";
+    return "Google CAPTCHA/rate limit detected. Slow down or wait before continuing.";
   }
   return "";
 }
@@ -1422,7 +1409,7 @@ function rowCompanyName(row) {
 }
 
 function workerMessage(workerIndex, parallelism, message) {
-  return parallelism > 1 ? `Gemini ${workerIndex + 1}: ${message}` : message;
+  return parallelism > 1 ? `Worker ${workerIndex + 1}: ${message}` : message;
 }
 
 function applySkippedResult(output, entry, message) {
@@ -1432,12 +1419,12 @@ function applySkippedResult(output, entry, message) {
       websiteUrl: "",
       email: "",
       phone: "",
-      contactSource: `Gemini Playwright skipped: ${message}`
+      contactSource: `ChatGPT Playwright skipped: ${message}`
     };
   }
 }
 
-function applyGeminiResult(output, entry, result, resultListPath) {
+function applyChatGPTResult(output, entry, result, resultListPath) {
   for (const index of entry.indexes) {
     output[index] = {
       ...output[index],
@@ -1445,7 +1432,7 @@ function applyGeminiResult(output, entry, result, resultListPath) {
       email: result.email,
       phone: result.phone_number,
       contactSource: [
-        "Gemini Playwright",
+        "ChatGPT Playwright",
         result.source_url,
         resultListPath,
         result.notes
@@ -1454,49 +1441,72 @@ function applyGeminiResult(output, entry, result, resultListPath) {
   }
 }
 
-function isRetryableGeminiJsonError(message) {
-  return /Gemini JSON response timed out|Gemini showed a server\/response error|Gemini prompt was filled, but the Send button was not activated|Gemini browser storage\/data is full/i
-    .test(String(message || ""));
-}
-
-function fallbackGeminiResult(row, sourceUrl, reason) {
-  const company = cleanText(row.websiteName || row.companyName || row.consignee);
-  const url = normalizeFirstResultUrl(sourceUrl);
+function batchFallbackResult(item, reason) {
+  const row = item.entry.row;
   return {
-    company_name: company,
-    website_url: url,
+    batch_id: item.batchId,
+    company_name: rowCompanyName(row),
+    website_url: "",
     phone_number: "",
     email: "",
-    source_url: url,
+    source_url: "",
     confidence: 0,
-    notes: cleanText(`Empty JSON fallback after Gemini retry: ${reason || "no strict JSON returned"}`)
+    notes: cleanText(reason || "No ChatGPT batch JSON result")
   };
 }
 
-class GeminiPlaywrightAgent {
+function applyBatchChatGPTResult(output, item, parsed, reason) {
+  const parsedWebsiteUrl = parsed && typeof parsed === "object"
+    ? normalizeFirstResultUrl(parsed.website_url || parsed.websiteUrl)
+    : "";
+  const parsedSourceUrl = parsed && typeof parsed === "object"
+    ? normalizeFirstResultUrl(parsed.source_url)
+    : "";
+  const source = parsed && typeof parsed === "object"
+    ? {
+      ...parsed,
+      batch_id: cleanText(parsed.batch_id || parsed.id || item.batchId),
+      company_name: cleanText(parsed.company_name) || rowCompanyName(item.entry.row),
+      website_url: parsedWebsiteUrl,
+      source_url: parsedSourceUrl || parsedWebsiteUrl,
+      notes: cleanText(parsed.notes) || cleanText(reason)
+    }
+    : batchFallbackResult(item, reason);
+  const result = normalizedFirstResult(source, item.entry.row, parsedWebsiteUrl);
+  if (result.phone_number && shouldClearRejectedContact(result)) {
+    result.phone_number = "";
+  }
+  if (result.email && shouldClearRejectedContact(result)) {
+    result.email = "";
+  }
+  applyChatGPTResult(output, item.entry, result, item.resultListPath);
+  return result;
+}
+
+class ChatGptPlaywrightAgent {
   constructor() {
     loadEnv(path.resolve(process.cwd(), ".env"));
-    this.profileDir = path.resolve(process.cwd(), process.env.GEMINI_PROFILE_DIR || "agent-data/gemini-profile");
-    this.headless = booleanEnv("GEMINI_HEADLESS", true);
-    this.timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 30000);
-    this.geminiJsonRetries = numericEnv("GEMINI_JSON_RETRIES", 2, 0, 5);
-    this.parallelism = numericEnv("GEMINI_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
-    this.parallelismAuto = booleanEnv("GEMINI_PARALLELISM_AUTO", true);
-    this.maxParallelism = numericEnv("GEMINI_MAX_PARALLELISM", 10, 1, 30);
-    this.pageMemoryMb = numericEnv("GEMINI_PAGE_MEMORY_MB", 700, 256, 4096);
-    this.systemReserveMemoryMb = numericEnv("GEMINI_SYSTEM_RESERVE_MEMORY_MB", defaultSystemReserveMemoryMb(), 512, 32768);
-    this.diskCacheMb = numericEnv("GEMINI_DISK_CACHE_MB", 128, 32, 1024);
-    this.blockHeavyResources = booleanEnv("GEMINI_BLOCK_HEAVY_RESOURCES", true);
-    this.minFreeMemoryMb = numericEnv("GEMINI_MIN_FREE_MEMORY_MB", 2048, 0, 32768);
-    this.workerStaggerMs = numericEnv("GEMINI_WORKER_STAGGER_MS", 900, 0, 10000);
-    this.googleSearchGapMs = numericEnv("GOOGLE_SEARCH_GAP_MS", 4000, 1000, 60000);
-    this.googleCaptchaCooldownMs = numericEnv("GOOGLE_CAPTCHA_COOLDOWN_MS", 180000, 30000, 1800000);
-    this.googleNextSearchAt = 0;
-    this.googleCooldownUntil = 0;
+    this.profileDir = path.resolve(process.cwd(), process.env.CHATGPT_PROFILE_DIR || "agent-data/chatgpt-profile");
+    this.headless = booleanEnv("CHATGPT_HEADLESS", true);
+    this.timeoutMs = Number(process.env.CHATGPT_TIMEOUT_MS || 30000);
+    this.batchTimeoutMs = numericEnv("CHATGPT_BATCH_TIMEOUT_MS", Math.max(this.timeoutMs, 600000), 15000, 900000);
+    this.batchSize = numericEnv("CHATGPT_BATCH_SIZE", 25, 1, 50);
+    this.chatgptBatchParallelism = numericEnv("CHATGPT_BATCH_PARALLELISM", 4, 1, 4);
+    this.promptReviewMs = numericEnv("CHATGPT_PROMPT_REVIEW_MS", 0, 0, 600000);
+    this.parallelism = numericEnv("CHATGPT_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
+    this.parallelismAuto = booleanEnv("CHATGPT_PARALLELISM_AUTO", true);
+    this.maxParallelism = numericEnv("CHATGPT_MAX_PARALLELISM", 10, 1, 30);
+    this.pageMemoryMb = numericEnv("CHATGPT_PAGE_MEMORY_MB", 700, 256, 4096);
+    this.systemReserveMemoryMb = numericEnv("CHATGPT_SYSTEM_RESERVE_MEMORY_MB", defaultSystemReserveMemoryMb(), 512, 32768);
+    this.diskCacheMb = numericEnv("CHATGPT_DISK_CACHE_MB", 128, 32, 1024);
+    this.blockHeavyResources = booleanEnv("CHATGPT_BLOCK_HEAVY_RESOURCES", true);
+    this.minFreeMemoryMb = numericEnv("CHATGPT_MIN_FREE_MEMORY_MB", 2048, 0, 32768);
+    this.workerStaggerMs = numericEnv("CHATGPT_WORKER_STAGGER_MS", 900, 0, 10000);
     this.context = null;
     this.contextHeadless = null;
-    this.geminiPage = null;
+    this.chatgptPage = null;
     this.activeWorkerPages = 0;
+    this.reservedWorkerPages = new WeakSet();
     this.currentPageLimit = 1;
     this.manualIntervention = null;
     this.interventionSerial = 0;
@@ -1532,7 +1542,7 @@ class GeminiPlaywrightAgent {
       const message = cleanText(error?.message || error);
       if (/profile is already in use|opening in existing browser session/i.test(message)) {
         throw new Error(
-          "Gemini Playwright profile is already open. Stop the `npm run agent:login` terminal "
+          "ChatGPT Playwright profile is already open. Stop the `npm run agent:login` terminal "
           + "or close its Playwright Chrome window, then restart `npm run agent`."
         );
       }
@@ -1543,10 +1553,11 @@ class GeminiPlaywrightAgent {
         const resourceType = route.request().resourceType();
         const requestUrl = route.request().url();
         const isAuthChallenge = /accounts\.google\.com|recaptcha|\/challenge\//i.test(requestUrl);
+        const isChatGptUi = isChatGptUiUrl(requestUrl);
         const blockedTypes = headless
           ? ["font", "image", "media", "texttrack", "stylesheet"]
           : ["font", "image", "media", "texttrack"];
-        if (!isAuthChallenge && blockedTypes.includes(resourceType)) {
+        if (!isAuthChallenge && !isChatGptUi && blockedTypes.includes(resourceType)) {
           await route.abort().catch(() => {});
           return;
         }
@@ -1559,11 +1570,11 @@ class GeminiPlaywrightAgent {
   async openLogin(options = {}) {
     const context = await this.launch(options.visible ? false : this.headless);
     const reusablePage = context.pages().find((page) => !page.isClosed());
-    this.geminiPage = this.geminiPage && !this.geminiPage.isClosed()
-      ? this.geminiPage
+    this.chatgptPage = this.chatgptPage && !this.chatgptPage.isClosed()
+      ? this.chatgptPage
       : (reusablePage || await context.newPage());
-    await this.geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded" });
-    return this.geminiPage;
+    await this.chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded" });
+    return this.chatgptPage;
   }
 
   async waitForLogin(onStatus, existingPage = null) {
@@ -1577,17 +1588,34 @@ class GeminiPlaywrightAgent {
       if (await findPromptBox(page)) {
         return page;
       }
-      onStatus?.("waiting_login", "Complete Gemini login in the Playwright Chrome window.");
+      onStatus?.("waiting_login", "Complete ChatGPT login in the Playwright Chrome window.");
       await page.waitForTimeout(2000);
     }
-    throw new Error("Gemini login timed out");
+    throw new Error("ChatGPT login timed out");
   }
 
   async waitForPrompt(page, timeoutMs = 15000) {
     const deadline = Date.now() + timeoutMs;
+    let reloaded = false;
+    let clickedNewChat = false;
     while (Date.now() < deadline) {
       if (await findPromptBox(page)) {
         return true;
+      }
+      if (!clickedNewChat) {
+        const newChat = page.getByRole("link", { name: /new chat/i }).or(page.getByRole("button", { name: /new chat/i })).first();
+        if (await newChat.count().catch(() => 0) && await newChat.isVisible().catch(() => false)) {
+          clickedNewChat = true;
+          await newChat.click().catch(() => {});
+          await page.waitForTimeout(1500);
+          continue;
+        }
+      }
+      if (!reloaded && Date.now() + Math.max(12000, timeoutMs / 2) < deadline) {
+        reloaded = true;
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(2500);
+        continue;
       }
       await page.waitForTimeout(750);
     }
@@ -1598,8 +1626,9 @@ class GeminiPlaywrightAgent {
     await this.context?.close().catch(() => {});
     this.context = null;
     this.contextHeadless = null;
-    this.geminiPage = null;
+    this.chatgptPage = null;
     this.activeWorkerPages = 0;
+    this.reservedWorkerPages = new WeakSet();
   }
 
   async waitForManualIntervention({ page, trackedPage, kind, url, onStatus = () => {} }) {
@@ -1625,8 +1654,8 @@ class GeminiPlaywrightAgent {
       onStatus(
         kind === "captcha" ? "waiting_captcha" : "waiting_login",
         kind === "captcha"
-          ? "Opening Chrome now for CAPTCHA. Interrupted rows will retry automatically."
-          : "Opening Chrome now for Gemini login. Interrupted rows will retry automatically."
+          ? "Opening Chrome now for CAPTCHA. Background processing will resume after it is solved."
+          : "Opening Chrome now for ChatGPT login. Background processing will resume after login."
       );
       if (trackedPage) {
         await this.closeWorkerPage(page);
@@ -1643,7 +1672,7 @@ class GeminiPlaywrightAgent {
       const status = kind === "captcha" ? "waiting_captcha" : "waiting_login";
       const message = kind === "captcha"
         ? "Solve the CAPTCHA in the opened Chrome window. Background processing will resume automatically."
-        : "Complete Gemini login in the opened Chrome window. Background processing will resume automatically.";
+        : "Complete ChatGPT login in the opened Chrome window. Background processing will resume automatically.";
       const deadline = Date.now() + 15 * 60 * 1000;
       let solved = false;
       while (Date.now() < deadline) {
@@ -1678,41 +1707,26 @@ class GeminiPlaywrightAgent {
     return promise;
   }
 
-  async ensureGeminiLogin(onStatus = () => {}) {
+  async ensureChatGPTLogin(onStatus = () => {}) {
     const page = await this.openLogin();
-    if (await this.waitForPrompt(page, 15000)) {
+    if (await this.waitForPrompt(page, 60000)) {
       await page.close().catch(() => {});
-      this.geminiPage = null;
+      this.chatgptPage = null;
       return;
     }
-    this.geminiPage = null;
+    if (!await isLikelyChatGptLoginPage(page)) {
+      await page.close().catch(() => {});
+      this.chatgptPage = null;
+      throw new Error("ChatGPT is signed in but the prompt box did not become ready in background Chrome");
+    }
+    this.chatgptPage = null;
     await this.waitForManualIntervention({
       page,
       trackedPage: false,
       kind: "login",
-      url: "https://gemini.google.com/app",
+      url: AI_PROVIDER_URL,
       onStatus
     });
-  }
-
-  async waitForGoogleSearchTurn(onWait = () => {}) {
-    while (this.manualIntervention) {
-      await this.manualIntervention.promise;
-    }
-    while (true) {
-      const now = Date.now();
-      const waitMs = Math.max(this.googleNextSearchAt, this.googleCooldownUntil) - now;
-      if (waitMs <= 0) {
-        this.googleNextSearchAt = Date.now() + this.googleSearchGapMs;
-        return;
-      }
-      onWait(Math.ceil(waitMs / 1000));
-      await delay(Math.min(waitMs, 5000));
-    }
-  }
-
-  noteGoogleCaptcha() {
-    this.googleCooldownUntil = Math.max(this.googleCooldownUntil, Date.now() + this.googleCaptchaCooldownMs);
   }
 
   async newWorkerPage(onWait = () => {}) {
@@ -1738,7 +1752,14 @@ class GeminiPlaywrightAgent {
     this.activeWorkerPages += 1;
     try {
       const context = await this.launch(this.headless);
-      return await context.newPage();
+      const blankPage = context.pages().find((page) => (
+        !page.isClosed()
+        && page.url() === "about:blank"
+        && !this.reservedWorkerPages.has(page)
+      ));
+      const page = blankPage || await context.newPage();
+      this.reservedWorkerPages.add(page);
+      return page;
     } catch (error) {
       this.activeWorkerPages = Math.max(0, this.activeWorkerPages - 1);
       throw error;
@@ -1750,6 +1771,7 @@ class GeminiPlaywrightAgent {
       return;
     }
     await page.close().catch(() => {});
+    this.reservedWorkerPages.delete(page);
     this.activeWorkerPages = Math.max(0, this.activeWorkerPages - 1);
   }
 
@@ -1769,7 +1791,6 @@ class GeminiPlaywrightAgent {
 
   async processRows(rows, jobDir, onProgress = () => {}) {
     await this.launch(this.headless);
-    await this.ensureGeminiLogin((status, message) => onProgress({ status, message }));
     const unique = new Map();
     rows.forEach((row, index) => {
       const key = companyKey(row);
@@ -1786,281 +1807,222 @@ class GeminiPlaywrightAgent {
       return output;
     }
 
-    const requestedParallelism = Math.min(this.parallelism, entries.length);
-    const parallelism = this.effectiveParallelism(entries.length);
-    this.currentPageLimit = parallelism;
-    let nextPosition = 0;
+    const batchSize = Math.min(this.batchSize, entries.length);
+    const batchParallelism = Math.min(this.chatgptBatchParallelism, Math.max(1, Math.ceil(entries.length / batchSize)));
+    this.currentPageLimit = Math.max(1, batchParallelism);
     let completed = 0;
-    const adaptiveMessage = this.parallelismAuto && parallelism < requestedParallelism
-      ? ` (adaptive safe limit from requested ${requestedParallelism})`
-      : "";
+    let nextBatchIndex = 0;
     onProgress({
       status: "running",
       processed: 0,
       total: entries.length,
       company: "",
-      message: `Starting ${parallelism} parallel Gemini tab${parallelism === 1 ? "" : "s"}${adaptiveMessage}`,
+      message: `Starting direct ChatGPT extraction: ${batchSize}-query batch(es), ${batchParallelism} in parallel`,
       rows: output
     });
 
-    const workers = Array.from({ length: parallelism }, async (_, workerIndex) => {
-      if (workerIndex && this.workerStaggerMs) {
-        await new Promise((resolve) => setTimeout(resolve, workerIndex * this.workerStaggerMs));
-      }
-      while (true) {
-        const position = nextPosition;
-        nextPosition += 1;
-        if (position >= entries.length) {
-          break;
-        }
-        const result = await this.processEntry({
-          entry: entries[position],
-          position,
-          total: entries.length,
-          jobDir,
-          output,
-          workerIndex,
-          parallelism,
-          completedCount: () => completed,
-          onProgress
-        });
-        completed += 1;
+    const indexedEntries = entries.map((entry, position) => ({ entry, position }));
+    const batches = [];
+    for (let start = 0; start < indexedEntries.length; start += batchSize) {
+      batches.push(indexedEntries.slice(start, start + batchSize));
+    }
+
+    const activeChatGptBatches = new Set();
+
+    const startChatGptBatch = (batchIndex, workerIndex) => {
+      const items = this.directChatGPTBatchItems(batches[batchIndex], jobDir);
+      const task = this.processChatGPTBatch({
+        items,
+        batchIndex,
+        totalBatches: batches.length,
+        total: entries.length,
+        output,
+        jobDir,
+        workerIndex,
+        batchParallelism,
+        completedCount: () => completed,
+        onProgress
+      }).then((result) => {
+        completed += items.length;
         onProgress({
           status: "running",
           processed: completed,
           total: entries.length,
           company: result.company,
-          message: workerMessage(workerIndex, parallelism, result.message),
+          message: result.message,
           rows: output
         });
-      }
-    });
+      }).finally(() => {
+        activeChatGptBatches.delete(task);
+      });
+      activeChatGptBatches.add(task);
+    };
 
-    await Promise.all(workers);
+    while (activeChatGptBatches.size || nextBatchIndex < batches.length) {
+      while (nextBatchIndex < batches.length && activeChatGptBatches.size < batchParallelism) {
+        const batchIndex = nextBatchIndex;
+        nextBatchIndex += 1;
+        startChatGptBatch(batchIndex, activeChatGptBatches.size);
+      }
+
+      const waiters = [];
+      for (const task of activeChatGptBatches) {
+        waiters.push(task.then(() => ({ type: "chatgpt" }), () => ({ type: "chatgpt" })));
+      }
+      if (!waiters.length) {
+        break;
+      }
+      await Promise.race(waiters);
+    }
+
+    await Promise.all(activeChatGptBatches);
     return output;
   }
 
-  async processEntry({
-    entry,
-    position,
+  directChatGPTBatchItems(batch, jobDir) {
+    return batch.map(({ entry, position }) => {
+      const row = entry.row;
+      const queryText = googleQueryText(row);
+      const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-chatgpt-input.json`);
+      const item = {
+        batchId: batchId(position),
+        entry,
+        position,
+        queryText,
+        resultListPath,
+        company: rowCompanyName(row),
+        error: ""
+      };
+      fs.writeFileSync(resultListPath, JSON.stringify({
+        batch_id: item.batchId,
+        query: queryText
+      }, null, 2));
+      return item;
+    });
+  }
+
+  async processChatGPTBatch({
+    items,
+    batchIndex,
+    totalBatches,
     total,
-    jobDir,
     output,
-    workerIndex,
-    parallelism,
+    jobDir,
+    workerIndex = 0,
+    batchParallelism = 1,
     completedCount,
     onProgress
   }) {
-    const row = entry.row;
-    let observedInterventionSerial = this.interventionSerial;
-    let searchPage = null;
-    let geminiPage = null;
-    let organicResults = [];
-    let contactCandidates = [];
-    const company = rowCompanyName(row);
-    const queryUrl = googleQueryUrl(row);
-    const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-google-results.json`);
+    let chatgptPage = null;
+    let parsedResults = [];
+    let errorMessage = "";
+    const firstPosition = items[0]?.position || 0;
+    const debugBasePath = path.join(jobDir, `${String(firstPosition + 1).padStart(5, "0")}-batch-${batchIndex + 1}`);
+    const prompt = batchResultPrompt(items);
+    fs.writeFileSync(`${debugBasePath}-chatgpt-prompt.txt`, prompt);
     const progress = (message, status = "running") => onProgress({
       status,
       processed: completedCount(),
       total,
-      company,
-      message: workerMessage(workerIndex, parallelism, message)
+      company: items[0]?.company || "",
+      message: workerMessage(workerIndex, batchParallelism, message)
     });
 
     try {
-      for (let searchAttempt = 0; searchAttempt < 2; searchAttempt += 1) {
-        progress(searchAttempt ? "Resuming Google query after CAPTCHA" : "Opening Google query");
-        await this.waitForGoogleSearchTurn((seconds) => {
-          progress(`Google cooldown ${seconds}s`);
-        });
-        searchPage = await this.newWorkerPage((freeMemoryMb) => {
+      try {
+        chatgptPage = await this.newWorkerPage((freeMemoryMb) => {
           progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
         });
-        await searchPage.goto(queryUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-        await dismissGoogleConsent(searchPage);
-        await searchPage.waitForTimeout(1800);
-        const captchaMessage = await googleCaptchaMessage(searchPage);
-        if (captchaMessage) {
-          const challengeUrl = searchPage.url() || queryUrl;
-          const challengePage = searchPage;
-          searchPage = null;
+        await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+        if (!await this.waitForPrompt(chatgptPage, 60000)) {
+          if (!await isLikelyChatGptLoginPage(chatgptPage)) {
+            await chatgptPage.screenshot({ path: `${debugBasePath}-prompt-not-ready.png`, fullPage: true }).catch(() => {});
+            fs.writeFileSync(`${debugBasePath}-prompt-not-ready.html`, await chatgptPage.content().catch(() => ""));
+            throw new Error("ChatGPT prompt was not ready in background Chrome; saved debug page without opening login window");
+          }
+          const loginPage = chatgptPage;
+          chatgptPage = null;
           await this.waitForManualIntervention({
-            page: challengePage,
+            page: loginPage,
             trackedPage: true,
-            kind: "captcha",
-            url: challengeUrl,
+            kind: "login",
+            url: AI_PROVIDER_URL,
             onStatus: (status, message) => onProgress({
               status,
               processed: completedCount(),
               total,
-              company,
-              message: workerMessage(workerIndex, parallelism, message)
+              company: items[0]?.company || "",
+              message
             })
           });
-          observedInterventionSerial = this.interventionSerial;
-          continue;
-        }
-        organicResults = await googleOrganicResults(searchPage, 15);
-        break;
-      }
-      fs.writeFileSync(resultListPath, JSON.stringify({
-        queryUrl,
-        company,
-        country: cleanText(row.country),
-        results: organicResults
-      }, null, 2));
-      if (!organicResults.length) {
-        throw new Error("No non-sponsored Google organic results were extracted");
-      }
-      progress(`Checking organic result pages for visible contacts (${organicResults.length} links)`);
-      contactCandidates = await collectContactCandidates(this.context, organicResults, () => {}, searchPage);
-      if (this.interventionSerial > observedInterventionSerial) {
-        throw new Error("Browser context switched for manual CAPTCHA/login");
-      }
-      fs.writeFileSync(resultListPath, JSON.stringify({
-        queryUrl,
-        company,
-        country: cleanText(row.country),
-        results: organicResults,
-        contactCandidates
-      }, null, 2));
-      const firstOrganicUrl = organicResults[0].url;
-
-      await this.closeWorkerPage(searchPage);
-      searchPage = null;
-
-      const openReadyGeminiPage = async () => {
-        geminiPage = await this.newWorkerPage((freeMemoryMb) => {
-          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
-        });
-        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
-        if (await this.waitForPrompt(geminiPage, 15000)) {
-          return;
-        }
-        const loginPage = geminiPage;
-        geminiPage = null;
-        await this.waitForManualIntervention({
-          page: loginPage,
-          trackedPage: true,
-          kind: "login",
-          url: "https://gemini.google.com/app",
-          onStatus: (status, message) => onProgress({
-            status,
-            processed: completedCount(),
-            total,
-            company,
-            message: workerMessage(workerIndex, parallelism, message)
-          })
-        });
-        observedInterventionSerial = this.interventionSerial;
-        geminiPage = await this.newWorkerPage((freeMemoryMb) => {
-          progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
-        });
-        await geminiPage.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
-        if (!await this.waitForPrompt(geminiPage, 15000)) {
-          throw new Error("Gemini prompt was not available after manual login");
-        }
-      };
-
-      const debugBasePath = path.join(jobDir, String(position + 1).padStart(5, "0"));
-      const prompt = resultPrompt(row, queryUrl, organicResults, contactCandidates);
-      let parsed = null;
-      let lastGeminiJsonError = "";
-      let usedFallback = false;
-      const totalGeminiAttempts = this.geminiJsonRetries + 1;
-      for (let geminiAttempt = 0; geminiAttempt < totalGeminiAttempts; geminiAttempt += 1) {
-        if (geminiAttempt > 0) {
-          progress(`Gemini JSON not received; retrying ${geminiAttempt + 1}/${totalGeminiAttempts}`);
-          await this.closeWorkerPage(geminiPage);
-          geminiPage = null;
-        }
-        await openReadyGeminiPage();
-        await fillPrompt(geminiPage, prompt);
-        progress(geminiAttempt
-          ? `Retrying Gemini JSON request (${geminiAttempt + 1}/${totalGeminiAttempts})`
-          : `Google results sent to Gemini (${organicResults.length} links, ${contactCandidates.length} contact candidates)`);
-        const attemptDebugBasePath = geminiAttempt ? `${debugBasePath}-retry-${geminiAttempt}` : debugBasePath;
-        await sendPrompt(geminiPage, prompt, attemptDebugBasePath);
-        progress(geminiAttempt ? `Waiting for strict Gemini JSON retry ${geminiAttempt + 1}/${totalGeminiAttempts}` : "Waiting for strict Gemini JSON");
-        try {
-          parsed = await waitForGeminiJson(
-            geminiPage,
-            this.timeoutMs,
-            attemptDebugBasePath
-          );
-          break;
-        } catch (error) {
-          const retryMessage = cleanText(error?.message || error);
-          if (!isRetryableGeminiJsonError(retryMessage)) {
-            throw error;
+          chatgptPage = await this.newWorkerPage((freeMemoryMb) => {
+            progress(`Waiting for free system memory (${freeMemoryMb} MB available)`);
+          });
+          await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+          if (!await this.waitForPrompt(chatgptPage, 60000)) {
+            throw new Error("ChatGPT prompt was not available after manual login");
           }
-          lastGeminiJsonError = retryMessage;
         }
-      }
-      if (!parsed) {
-        parsed = fallbackGeminiResult(row, firstOrganicUrl, lastGeminiJsonError);
-        usedFallback = true;
-      }
-      const result = normalizedFirstResult(parsed, row, firstOrganicUrl);
-      if (result.phone_number && shouldClearRejectedContact(result)) {
-        result.phone_number = "";
-      }
-      if (result.email && shouldClearRejectedContact(result)) {
-        result.email = "";
-      }
-      if (!result.phone_number) {
-        const phoneCandidate = contactCandidates.find((candidate) => candidate.type === "phone" && trustedFallbackCandidate(candidate));
-        if (phoneCandidate) {
-          result.phone_number = phoneCandidate.value;
-          result.source_url = phoneCandidate.source_url || result.source_url;
-          result.notes = cleanText(`${result.notes} Phone fallback from rank ${phoneCandidate.rank}: ${phoneCandidate.source_url}.`);
+        const highMode = await selectChatGptHighMode(chatgptPage);
+        if (highMode) {
+          progress(`ChatGPT mode: ${highMode}`);
         }
-      }
-      if (!result.email) {
-        const emailCandidate = contactCandidates.find((candidate) => candidate.type === "email" && trustedFallbackCandidate(candidate));
-        if (emailCandidate) {
-          result.email = emailCandidate.value;
-          result.source_url = result.source_url || emailCandidate.source_url;
-          result.notes = cleanText(`${result.notes} Email fallback from rank ${emailCandidate.rank}: ${emailCandidate.source_url}.`);
+        await fillPrompt(chatgptPage, prompt);
+        if (!this.headless && this.promptReviewMs > 0) {
+          progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: visible prompt review`);
+          await chatgptPage.waitForTimeout(this.promptReviewMs);
         }
+        progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: sending ${items.length} query inputs`);
+        await sendPrompt(chatgptPage, prompt, debugBasePath);
+        progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: waiting for ${items.length} JSON objects`);
+        parsedResults = await waitForChatGPTBatchJson(
+          chatgptPage,
+          items.length,
+          this.batchTimeoutMs,
+          debugBasePath,
+          items.map((item) => item.batchId)
+        );
+      } catch (error) {
+        errorMessage = cleanText(error?.message || error);
       }
-      applyGeminiResult(output, entry, result, resultListPath);
+
+      const byId = new Map();
+      for (const parsed of parsedResults) {
+        byId.set(cleanText(parsed.batch_id || parsed.id), parsed);
+      }
+      items.forEach((item) => {
+        const parsed = byId.get(item.batchId) || null;
+        const reason = item.error
+          ? `Query input unavailable: ${item.error}`
+          : (errorMessage ? `ChatGPT batch issue: ${errorMessage}` : "");
+        applyBatchChatGPTResult(output, item, parsed, reason);
+      });
+      fs.writeFileSync(`${debugBasePath}-chatgpt-batch-summary.json`, JSON.stringify({
+        batch: batchIndex + 1,
+        totalBatches,
+        requested: items.map((item) => item.batchId),
+        received: parsedResults.map((result) => cleanText(result.batch_id || result.id)),
+        error: errorMessage
+      }, null, 2));
+
+      const message = errorMessage
+        ? `ChatGPT batch ${batchIndex + 1}/${totalBatches}: saved fallback blanks for ${items.length}`
+        : `ChatGPT batch ${batchIndex + 1}/${totalBatches}: received ${parsedResults.length}/${items.length} JSON objects`;
+      onProgress({
+        status: "running",
+        processed: completedCount() + items.length,
+        total,
+        company: items[items.length - 1]?.company || "",
+        message,
+        rows: output
+      });
+
       return {
-        company: result.company_name || company,
-        message: usedFallback
-          ? "Gemini empty JSON fallback saved after retries"
-          : "Gemini JSON received"
-      };
-    } catch (error) {
-      if (this.interventionSerial > observedInterventionSerial) {
-        searchPage = null;
-        geminiPage = null;
-        while (this.manualIntervention) {
-          await this.manualIntervention.promise;
-        }
-        progress("Retrying row after manual CAPTCHA/login");
-        return this.processEntry({
-          entry,
-          position,
-          total,
-          jobDir,
-          output,
-          workerIndex,
-          parallelism,
-          completedCount,
-          onProgress
-        });
-      }
-      const message = cleanText(error?.message || error);
-      applySkippedResult(output, entry, message);
-      return {
-        company,
-        message: `Skipped: ${message}`
+        company: items[items.length - 1]?.company || "",
+        message
       };
     } finally {
-      await this.closeWorkerPage(searchPage);
-      await this.closeWorkerPage(geminiPage);
+      await this.closeWorkerPage(chatgptPage);
     }
   }
 
@@ -2070,16 +2032,18 @@ class GeminiPlaywrightAgent {
 }
 
 module.exports = {
-  GeminiPlaywrightAgent,
+  ChatGptPlaywrightAgent,
   loadEnv,
   parseJsonObject,
   parseJsonObjects,
-  isGeminiResult,
+  parseJsonArrays,
+  parseChatGPTBatchResults,
+  isChatGPTResult,
   normalizedResult,
   normalizedFirstResult,
+  applyBatchChatGPTResult,
   googleQueryUrl,
-  isRetryableGeminiJsonError,
-  fallbackGeminiResult,
+  googleQueryText,
   clearProfileCaches,
   availableMemoryMb,
   totalMemoryMb,

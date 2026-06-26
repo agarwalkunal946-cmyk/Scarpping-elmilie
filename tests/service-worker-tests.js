@@ -110,6 +110,7 @@ function send(message) {
   const captchaJob = await send({ type: "GET_PLAYWRIGHT_JOB" });
   assert.equal(captchaJob.status, "waiting_captcha");
   assert.equal(captchaJob.processed, 55);
+  assert.equal(captchaJob.rows[0].websiteName, "Fresh snapshot");
   assert.equal(badgeText, "IN");
   assert.equal(badgeColor, "#0b7fab");
   assert.equal(storageState.latestRows[0].websiteName, "Fresh snapshot");
@@ -126,6 +127,7 @@ function send(message) {
   assert.equal(badgeText, "OK");
   assert.equal(badgeColor, "#16815d");
   assert.equal(alarmCleared, true);
+  assert.equal(partialJob.rows[0].websiteName, "Fresh snapshot");
   assert.equal(storageState.latestRows[0].websiteName, "Fresh snapshot");
   assert.match(partialJob.message, /55\/102/);
 

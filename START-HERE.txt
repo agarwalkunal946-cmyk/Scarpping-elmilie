@@ -3,8 +3,8 @@ EXIM Elite Contact Exporter v1.7.9
 1. Open Terminal in this folder.
 2. Run: npm install
 3. Run: npm run agent:login
-4. Sign in to Gemini in the opened Chrome window.
-5. Wait until Terminal says "Gemini login confirmed" and Chrome closes itself.
+4. Sign in to ChatGPT in the opened Chrome window.
+5. Wait until Terminal says "ChatGPT login confirmed" and Chrome closes itself.
 6. Only after the login command exits, run: npm run agent
 7. Leave that Terminal window running.
 8. Open chrome://extensions and enable Developer mode.
@@ -13,32 +13,29 @@ EXIM Elite Contact Exporter v1.7.9
 
 Badge:
 AI = working
-IN = Gemini login needed
+IN = ChatGPT login needed
 OK = complete
 !  = failed
 
 The popup may close when you switch tabs. The local agent continues in the
 background; reopen the extension popup to see progress and export Excel.
 
-After the one-time visible npm run agent:login step, npm run agent processes in
-headless background mode. Chrome opens immediately when manual CAPTCHA/login
-action is needed; interrupted rows retry after it returns to headless mode. If the agent is
-stopped, the last saved partial rows remain exportable and the badge changes to OK.
-If Gemini does not return strict JSON within 30 seconds, the same request is
-retried in a fresh Gemini page. After the configured retries, the row is saved as
-empty JSON output instead of a skipped row.
+After the one-time visible npm run agent:login step, npm run agent opens a
+visible ChatGPT page so you can inspect the prompt. Chrome opens immediately
+when manual CAPTCHA/login action is needed. If the agent is stopped, the last
+saved partial rows remain exportable and the badge changes to OK.
 
 Mac and Windows use the same npm commands. The agent handles Command+V on
 macOS and Control+V on Windows/Linux internally.
 
 Every contact lookup uses the report's captured hover Google query URL first.
-The agent extracts Google organic links and visible contact candidates as text,
-then sends a strict JSON prompt to Gemini. It requests up to 15 Gemini workers
-by default, then auto-sizes the real parallel count for the current RAM/CPU so
-low devices stay smooth. Each worker keeps only one heavy page at a time, closes
-it after every row, waits when free RAM is low, caps browser cache, and prunes
-old job files on Mac and Windows. Waiting rows continue automatically.
-To tune it, run the agent with GEMINI_PARALLELISM=1..30 and keep
-GEMINI_PARALLELISM_AUTO=true for the smooth safe limit.
+The agent sends up to 25-row strict JSON batches to ChatGPT. ChatGPT searches
+the query, locks the first valid organic website URL, then finds phone/email
+from that site or clearly connected public sources. It tries to use ChatGPT
+High mode before each batch. Workers wait when free RAM is low, cap browser
+cache, and prune old job files on Mac and Windows. Waiting rows continue
+automatically.
+To tune it, run the agent with CHATGPT_PARALLELISM=1..30 and keep
+CHATGPT_PARALLELISM_AUTO=true for the smooth safe limit.
 
-No Gemini API key is required. Do not put account passwords in this folder.
+No ChatGPT API key is required. Do not put account passwords in this folder.

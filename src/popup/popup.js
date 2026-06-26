@@ -12,6 +12,24 @@ const DEFAULT_SETTINGS = {
   exportSchemaVersion: 10
 };
 
+const STORAGE_ROW_KEYS = [
+  "hsCode",
+  "websiteName",
+  "websiteUrl",
+  "email",
+  "phone",
+  "companyName",
+  "consignee",
+  "consigneeUrl",
+  "country",
+  "duplicateCount",
+  "contactSource",
+  "reviewStatus",
+  "sourceMethod",
+  "capturedAt"
+];
+const MAX_RAW_ROWS_STORAGE_BYTES = 2 * 1024 * 1024;
+
 const state = {
   rows: [],
   rawRows: [],
@@ -20,6 +38,45 @@ const state = {
   diagnostics: [],
   settings: { ...DEFAULT_SETTINGS }
 };
+
+function compactRowsForStorage(rows) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  return rows.map((row) => {
+    const compact = {};
+    for (const key of STORAGE_ROW_KEYS) {
+      if (row?.[key] !== undefined && row[key] !== null && row[key] !== "") {
+        compact[key] = row[key];
+      }
+    }
+    return compact;
+  });
+}
+
+function jsonStorageBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value || null)).length;
+}
+
+async function safeStorageSet(values) {
+  try {
+    await chrome.storage.local.set(values);
+    return true;
+  } catch (error) {
+    if (!/quota|storage/i.test(String(error?.message || error))) {
+      throw error;
+    }
+    const fallback = { ...values };
+    if (Array.isArray(fallback.latestRows)) {
+      fallback.latestRows = compactRowsForStorage(fallback.latestRows);
+    }
+    delete fallback.latestRawRows;
+    delete fallback.latestDiagnostics;
+    await chrome.storage.local.remove(["latestRawRows", "latestDiagnostics"]);
+    await chrome.storage.local.set(fallback);
+    return false;
+  }
+}
 
 const els = {
   pageStatus: document.getElementById("pageStatus"),
@@ -180,7 +237,7 @@ async function capture(mode) {
   setBusy(
     true,
     isFullCapture ? "Preparing capture" : "Reading report",
-    isFullCapture ? "Rows will be captured first, then the Playwright Gemini agent will fill contacts." : "Reading visible table rows."
+    isFullCapture ? "Rows will be captured first, then the Playwright ChatGPT agent will fill contacts." : "Reading visible table rows."
   );
   try {
     await updateSettingsFromForm();
@@ -268,7 +325,7 @@ async function capture(mode) {
     if (isFullCapture && state.rows.length) {
       const enriched = await enrichCurrentRows({
         startMessage: "Starting Playwright agent",
-        startDetail: "Google result links and Gemini JSON continue even if this popup closes."
+        startDetail: "Google result links and ChatGPT JSON continue even if this popup closes."
       });
       els.activity.textContent = enriched.ran
         ? enriched.message
@@ -336,7 +393,9 @@ function mergeLinkRows(primaryRows, linkRows) {
     ["hsCode", "consignee", "exporter", "country", "quantity", "fobValue"],
     ["hsCode", "consignee", "exporter", "country", "fobValue"],
     ["hsCode", "consignee", "exporter", "country", "quantity"],
-    ["hsCode", "consignee", "exporter", "country"]
+    ["hsCode", "consignee", "exporter", "country"],
+    ["consignee", "country"],
+    ["consignee"]
   ];
   const lookups = keySets.map((fields) => ({ fields, lookup: buildLinkLookup(linkRows, fields) }));
 
@@ -657,9 +716,10 @@ async function processAndStore(rawRows) {
   state.rows = processed.rows;
   state.columns = processed.columns;
   state.duplicatesRemoved = processed.duplicatesRemoved;
-  await chrome.storage.local.set({
-    latestRows: state.rows,
-    latestRawRows: state.rawRows,
+  const rawRowsForStorage = jsonStorageBytes(rawRows) <= MAX_RAW_ROWS_STORAGE_BYTES ? state.rawRows : [];
+  await safeStorageSet({
+    latestRows: compactRowsForStorage(state.rows),
+    latestRawRows: rawRowsForStorage,
     latestDuplicatesRemoved: state.duplicatesRemoved,
     latestDiagnostics: state.diagnostics,
     latestSchemaVersion: DEFAULT_SETTINGS.exportSchemaVersion
@@ -667,12 +727,38 @@ async function processAndStore(rawRows) {
   render();
 }
 
+async function saveLatestRows(rows, shouldRender = true) {
+  if (!Array.isArray(rows)) {
+    return;
+  }
+  state.rows = rows;
+  await safeStorageSet({
+    latestRows: compactRowsForStorage(state.rows),
+    latestSchemaVersion: DEFAULT_SETTINGS.exportSchemaVersion
+  });
+  if (shouldRender) {
+    render();
+  }
+}
+
+async function refreshLatestRowsFromStorage() {
+  const stored = await chrome.storage.local.get(["latestRows", "latestSchemaVersion"]);
+  if (
+    stored.latestSchemaVersion === DEFAULT_SETTINGS.exportSchemaVersion
+    && Array.isArray(stored.latestRows)
+    && stored.latestRows.length
+  ) {
+    state.rows = stored.latestRows;
+    render();
+  }
+}
+
 async function enrichContacts() {
   if (!state.rows.length) {
     return;
   }
 
-  setBusy(true, "Starting Playwright agent", "Google result links and Gemini JSON continue even if this popup closes.");
+  setBusy(true, "Starting Playwright agent", "Google result links and ChatGPT JSON continue even if this popup closes.");
   try {
     const enriched = await enrichCurrentRows({});
     els.activity.textContent = enriched.message;
@@ -696,7 +782,7 @@ async function enrichCurrentRows(options = {}) {
   setBusy(
     true,
     options.startMessage || "Starting Playwright agent",
-    options.startDetail || "Google result links and Gemini JSON continue even if this popup closes."
+    options.startDetail || "Google result links and ChatGPT JSON continue even if this popup closes."
   );
   const job = await chrome.runtime.sendMessage({
     type: "START_PLAYWRIGHT_JOB",
@@ -744,31 +830,82 @@ async function watchAgentJob(initialJob) {
       true,
       job.status === "waiting_captcha"
         ? "CAPTCHA solve required"
-        : (job.status === "waiting_login" ? "Gemini login required" : `Playwright working ${progress}`.trim()),
-      job.message || job.company || "Google result links and Gemini JSON processing."
+        : (job.status === "waiting_login" ? "ChatGPT login required" : `Playwright working ${progress}`.trim()),
+      job.message || job.company || "Google result links and ChatGPT JSON processing."
     );
     const nearDone = Number(job.total || 0) > 0 && Number(job.processed || 0) >= Number(job.total || 0) - 1;
     await sleep(nearDone ? 400 : 1500);
-    job = await chrome.runtime.sendMessage({ type: "GET_PLAYWRIGHT_JOB" });
+    try {
+      job = await chrome.runtime.sendMessage({ type: "GET_PLAYWRIGHT_JOB" });
+    } catch (error) {
+      const stopped = await markAgentJobStoppedFromStorage(initialJob.id, error?.message || String(error));
+      if (stopped) {
+        job = stopped;
+        break;
+      }
+      throw error;
+    }
+    if (!job) {
+      const stopped = await markAgentJobStoppedFromStorage(initialJob.id, "No response from the extension background worker");
+      if (stopped) {
+        job = stopped;
+        break;
+      }
+      throw new Error("No response from the extension background worker");
+    }
     if (job?.error) {
       const completedAfterError = await terminalAgentJobFromStorage(initialJob.id);
       if (completedAfterError) {
         job = completedAfterError;
         break;
       }
+      const stopped = await markAgentJobStoppedFromStorage(initialJob.id, job.error);
+      if (stopped) {
+        job = stopped;
+        break;
+      }
       throw new Error(job.error);
+    }
+    if (Array.isArray(job.rows)) {
+      await saveLatestRows(job.rows);
     }
   }
   if (job?.status === "failed") {
-    throw new Error(job.error || job.message || "Playwright Gemini job failed");
+    throw new Error(job.error || job.message || "Playwright ChatGPT job failed");
   }
   if (["completed", "partial"].includes(job?.status) && Array.isArray(job.rows)) {
-    await chrome.storage.local.set({ latestRows: job.rows });
+    await saveLatestRows(job.rows);
   }
   if (["completed", "partial"].includes(job?.status)) {
     await loadCompletedAgentRows();
   }
   return job;
+}
+
+async function markAgentJobStoppedFromStorage(jobId, reason) {
+  const stored = await chrome.storage.local.get(["latestAgentJob", "latestRows"]);
+  const job = stored.latestAgentJob;
+  if (job?.id !== jobId) {
+    return null;
+  }
+  if (["completed", "partial"].includes(job.status)) {
+    return agentJobWithStoredRows(job, stored.latestRows);
+  }
+  const partial = {
+    ...job,
+    status: "partial",
+    updatedAt: new Date().toISOString(),
+    error: "",
+    message: `Playwright agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results. Showing saved data.`,
+    stopReason: reason
+  };
+  const storageUpdate = { latestAgentJob: partial };
+  if (Array.isArray(stored.latestRows)) {
+    storageUpdate.latestRows = stored.latestRows;
+    storageUpdate.latestSchemaVersion = DEFAULT_SETTINGS.exportSchemaVersion;
+  }
+  await chrome.storage.local.set(storageUpdate);
+  return agentJobWithStoredRows(partial, stored.latestRows);
 }
 
 async function terminalAgentJobFromStorage(jobId) {
@@ -777,20 +914,20 @@ async function terminalAgentJobFromStorage(jobId) {
   if (job?.id !== jobId || !["completed", "partial"].includes(job.status)) {
     return null;
   }
-  if (Array.isArray(stored.latestRows)) {
-    state.rows = stored.latestRows;
+  return agentJobWithStoredRows(job, stored.latestRows);
+}
+
+function agentJobWithStoredRows(job, rows) {
+  if (Array.isArray(rows)) {
+    state.rows = rows;
     render();
-    return { ...job, rows: stored.latestRows };
+    return { ...job, rows };
   }
   return job;
 }
 
 async function loadCompletedAgentRows() {
-  const stored = await chrome.storage.local.get(["latestRows"]);
-  if (Array.isArray(stored.latestRows)) {
-    state.rows = stored.latestRows;
-    render();
-  }
+  await refreshLatestRowsFromStorage();
 }
 
 function agentLookupMessage(job) {
@@ -813,6 +950,7 @@ function compactMessage(value) {
 }
 
 async function exportRows(format) {
+  await refreshLatestRowsFromStorage();
   if (!state.rows.length) {
     return;
   }

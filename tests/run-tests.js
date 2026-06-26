@@ -3,20 +3,22 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const {
-  GeminiPlaywrightAgent,
+  ChatGptPlaywrightAgent,
   parseJsonObject,
   parseJsonObjects,
-  isGeminiResult,
+  parseJsonArrays,
+  parseChatGPTBatchResults,
+  isChatGPTResult,
   normalizedResult,
   normalizedFirstResult,
+  applyBatchChatGPTResult,
   googleQueryUrl,
-  isRetryableGeminiJsonError,
-  fallbackGeminiResult,
+  googleQueryText,
   clearProfileCaches,
   availableMemoryMb,
   adaptiveParallelismLimit,
   hardwareParallelismCap
-} = require("../agent/gemini-playwright");
+} = require("../agent/chatgpt-playwright");
 
 const root = path.resolve(__dirname, "..");
 const sandbox = {
@@ -40,7 +42,7 @@ vm.runInContext(fs.readFileSync(path.join(root, "src/lib/processor.js"), "utf8")
 vm.runInContext(fs.readFileSync(path.join(root, "src/lib/exporters.js"), "utf8"), sandbox);
 
 async function main() {
-  const interventionAgent = new GeminiPlaywrightAgent();
+  const interventionAgent = new ChatGptPlaywrightAgent();
   const launchModes = [];
   const interventionStatuses = [];
   let initialContextClosed = false;
@@ -65,6 +67,7 @@ async function main() {
   interventionAgent.context = {
     async close() { initialContextClosed = true; }
   };
+  interventionAgent.headless = true;
   interventionAgent.contextHeadless = true;
   interventionAgent.activeWorkerPages = 9;
   interventionAgent.launch = async (headless) => {
@@ -92,7 +95,7 @@ async function main() {
   assert.doesNotMatch(interventionStatuses.map((item) => item.message).join(" "), /Pausing \d+ active/);
 
   assert.ok(availableMemoryMb() > 0);
-  const cacheFixture = path.join("/private/tmp", `gemini-profile-cache-test-${process.pid}`);
+  const cacheFixture = path.join("/private/tmp", `chatgpt-profile-cache-test-${process.pid}`);
   fs.mkdirSync(path.join(cacheFixture, "Default", "Cache"), { recursive: true });
   fs.mkdirSync(path.join(cacheFixture, "Default", "Service Worker", "CacheStorage"), { recursive: true });
   fs.writeFileSync(path.join(cacheFixture, "Default", "Cache", "data"), "cache");
@@ -103,7 +106,7 @@ async function main() {
   assert.equal(fs.readFileSync(path.join(cacheFixture, "Default", "Cookies"), "utf8"), "keep-login");
   fs.rmSync(cacheFixture, { recursive: true, force: true });
 
-  const lockedCacheFixture = path.join("/private/tmp", `gemini-profile-locked-test-${process.pid}`);
+  const lockedCacheFixture = path.join("/private/tmp", `chatgpt-profile-locked-test-${process.pid}`);
   fs.mkdirSync(path.join(lockedCacheFixture, "Default", "Cache"), { recursive: true });
   fs.writeFileSync(path.join(lockedCacheFixture, "Default", "Cache", "data"), "active-cache");
   fs.writeFileSync(path.join(lockedCacheFixture, "SingletonLock"), "locked");
@@ -254,7 +257,10 @@ async function main() {
   }
 
   assert.equal(sandbox.window.EximProcessor.test.validWebsiteUrl("https://%2021St%20Cross"), "");
-  assert.equal(sandbox.window.EximProcessor.test.validWebsiteUrl("https://www.eximpedia.app/companies/rarr"), "");
+  assert.equal(
+    sandbox.window.EximProcessor.test.validWebsiteUrl("https://www.eximpedia.app/companies/rarr"),
+    "https://www.eximpedia.app/companies/rarr"
+  );
   assert.equal(sandbox.window.EximProcessor.test.validPhone("2091995945"), false);
   assert.equal(sandbox.window.EximProcessor.test.validPhone("+97145550123"), true);
 
@@ -271,7 +277,17 @@ async function main() {
   };
   assert.equal(
     googleQueryUrl(agentRow),
-    "https://google.com/search?q=RARR%20Nuts%20Trading%20LLC"
+    "https://www.google.com/search?num=10&hl=en&q=RARR%20Nuts%20Trading%20LLC"
+  );
+  const ampersandQueryRow = {
+    websiteName: "Spmuthiah & Sons Pte Ltd",
+    consigneeUrl: "https://google.com/search?q=Spmuthiah%20&%20Sons%20Pte%20Ltd%20SINGAPORE",
+    country: "SINGAPORE"
+  };
+  assert.equal(googleQueryText(ampersandQueryRow), "Spmuthiah & Sons Pte Ltd SINGAPORE");
+  assert.equal(
+    googleQueryUrl(ampersandQueryRow),
+    "https://www.google.com/search?num=10&hl=en&q=Spmuthiah%20%26%20Sons%20Pte%20Ltd%20SINGAPORE"
   );
   const agentJson = parseJsonObject(
     "```json\n" + JSON.stringify({
@@ -284,7 +300,7 @@ async function main() {
       notes: "Verified on the official contact page"
     }) + "\n```"
   );
-  assert.equal(isGeminiResult(agentJson), true);
+  assert.equal(isChatGPTResult(agentJson), true);
   const agentContact = normalizedResult(agentJson, agentRow, "");
   assert.equal(agentContact.website_url, "https://rarrnuts.com/");
   assert.equal(agentContact.email, "sales@rarrnuts.com");
@@ -293,25 +309,149 @@ async function main() {
   const promptTemplate = parseJsonObject(
     '{"company_name":"","website_url":"","phone_number":"","email":"","source_url":"","confidence":0,"notes":""}'
   );
-  assert.equal(isGeminiResult(promptTemplate), false);
+  assert.equal(isChatGPTResult(promptTemplate), false);
   const multipleObjects = parseJsonObjects(
     '{"company_name":"","website_url":"","notes":""}\n'
     + JSON.stringify(agentJson)
   );
   assert.equal(multipleObjects.length, 2);
-  assert.equal(multipleObjects.reverse().find(isGeminiResult).email, "sales@rarrnuts.com");
-  const blockedContact = normalizedResult({
+  assert.equal(multipleObjects.reverse().find(isChatGPTResult).email, "sales@rarrnuts.com");
+  const batchJson = [
+    {
+      batch_id: "Q001",
+      company_name: "RARR Nuts Trading LLC",
+      website_url: "https://rarrnuts.com/",
+      phone_number: "+971 4 555 0123",
+      email: "sales@rarrnuts.com",
+      source_url: "https://rarrnuts.com/contact",
+      confidence: 0.94,
+      notes: "Batch result"
+    },
+    {
+      batch_id: "Q002",
+      company_name: "Example Trading",
+      website_url: "https://example.com/",
+      phone_number: "",
+      email: "",
+      source_url: "https://example.com/",
+      confidence: 0.5,
+      notes: "No visible contact"
+    }
+  ];
+  assert.equal(parseJsonArrays("```json\n" + JSON.stringify(batchJson) + "\n```")[0].length, 2);
+  assert.equal(parseChatGPTBatchResults("```json\n" + JSON.stringify(batchJson) + "\n```", 2)[1].batch_id, "Q002");
+  assert.equal(parseChatGPTBatchResults("```json\n" + JSON.stringify(batchJson) + "\n```", 2, ["Q011", "Q012"]).length, 0);
+  const promptInputOnly = [{ batch_id: "Q001", query: "RARR Nuts Trading LLC UAE" }];
+  assert.equal(parseChatGPTBatchResults(JSON.stringify(promptInputOnly), 1, ["Q001"]).length, 0);
+  assert.equal(
+    parseChatGPTBatchResults(
+      `Input JSON:\n${JSON.stringify(promptInputOnly)}\nAnswer:\n${JSON.stringify([batchJson[0]])}`,
+      1,
+      ["Q001"]
+    )[0].website_url,
+    "https://rarrnuts.com/"
+  );
+  const wrappedChatGptJson = `[
+{
+"batch_id": "Q001",
+"company_name": "RARR Nuts Trading LLC",
+"website_url": "https://rarrnuts.com/
+",
+"phone_number": "+971 4 555 0123",
+"email": "sales@rarrnuts.com
+",
+"source_url": "https://rarrnuts.com/contact
+",
+"confidence": 0.94,
+"notes": "Wrapped URL/email text"
+},
+{
+"batch_id": "Q002",
+"company_name": "Example Trading",
+"website_url": "https://example.com/
+",
+"phone_number": "",
+"email": "",
+"source_url": "https://example.com/
+",
+"confidence": 0.5,
+"notes": "No visible contact"
+}
+]`;
+  const wrappedResults = parseChatGPTBatchResults(wrappedChatGptJson, 2, ["Q001", "Q002"]);
+  assert.equal(wrappedResults.length, 2);
+  assert.equal(wrappedResults[0].website_url, "https://rarrnuts.com/");
+  assert.equal(wrappedResults[0].email, "sales@rarrnuts.com");
+  const mixedBatchText = JSON.stringify(batchJson) + "\n" + JSON.stringify([
+    { ...batchJson[0], batch_id: "Q011" },
+    { ...batchJson[1], batch_id: "Q012" }
+  ]);
+  assert.deepEqual(
+    parseChatGPTBatchResults(mixedBatchText, 2, ["Q011", "Q012"]).map((item) => item.batch_id),
+    ["Q011", "Q012"]
+  );
+  const markdownUrlContact = normalizedFirstResult({
+    company_name: "Krishiv Foods LLC",
+    website_url: "[https://krishivfoods.com/](https://krishivfoods.com/)",
+    source_url: "[https://krishivfoods.com/contact](https://krishivfoods.com/contact)",
+    notes: "Markdown URL"
+  }, agentRow, "");
+  assert.equal(markdownUrlContact.website_url, "https://krishivfoods.com/");
+  assert.equal(markdownUrlContact.source_url, "https://krishivfoods.com/contact");
+  const arrowUrlContact = normalizedFirstResult({
+    company_name: "Fuchsiana General Trading LLC",
+    website_url: "https://www.exportersindia.com/ae/fuchsiana-general-trading-llc/↗",
+    phone_number: "+971 52 213 7960",
+    email: "",
+    source_url: "https://2gis.ae/dubai/firm/70000001086853355↗",
+    notes: "Phone found in same-company listing"
+  }, agentRow, "");
+  assert.equal(arrowUrlContact.website_url, "https://www.exportersindia.com/ae/fuchsiana-general-trading-llc/");
+  assert.equal(arrowUrlContact.source_url, "https://2gis.ae/dubai/firm/70000001086853355");
+  assert.equal(arrowUrlContact.phone_number, "+971 52 213 7960");
+  assert.equal(normalizedFirstResult({
+    company_name: "Masked Phone Example",
+    website_url: "https://example.com/",
+    phone_number: "+971 52 213 ....",
+    source_url: "https://example.com/"
+  }, agentRow, "").phone_number, "");
+  const fuchsianaRankOne = "https://www.exportersindia.com/ae/fuchsiana-general-trading-llc/";
+  const fuchsianaOutput = [{
+    hsCode: "08011220",
+    websiteName: "Fuchsiana General Trading LLC",
+    companyName: "Fuchsiana General Trading LLC",
+    consignee: "Fuchsiana General Trading LLC",
+    country: "UNITED ARAB EMIRATES",
+    websiteUrl: "",
+    email: "",
+    phone: ""
+  }];
+  applyBatchChatGPTResult(fuchsianaOutput, {
+    batchId: "Q001",
+    entry: { row: fuchsianaOutput[0], indexes: [0] },
+    resultListPath: "/tmp/q001-chatgpt-input.json"
+  }, {
+    batch_id: "Q001",
+    website_url: `[${fuchsianaRankOne}](${fuchsianaRankOne})`,
+    phone_number: "+971 52 213 7960",
+    email: ""
+  }, "");
+  assert.equal(fuchsianaOutput[0].websiteUrl, fuchsianaRankOne);
+  assert.equal(fuchsianaOutput[0].phone, "+971 52 213 7960");
+  assert.equal(fuchsianaOutput[0].email, "");
+  assert.ok(fuchsianaOutput[0].contactSource.includes(fuchsianaRankOne));
+  const dynamicPortalContact = normalizedResult({
     company_name: "RARR Nuts Trading LLC",
     website_url: "https://www.eximpedia.app/companies/rarr",
     phone_number: "2091995945",
     email: "info@eximpedia.app",
     source_url: "https://www.eximpedia.app/companies/rarr",
-    notes: "Portal result"
+    notes: "Dynamic portal result"
   }, agentRow, "");
-  assert.equal(blockedContact.website_url, "");
-  assert.equal(blockedContact.source_url, "");
-  assert.equal(blockedContact.email, "");
-  assert.equal(blockedContact.phone_number, "");
+  assert.equal(dynamicPortalContact.website_url, "https://www.eximpedia.app/companies/rarr");
+  assert.equal(dynamicPortalContact.source_url, "https://www.eximpedia.app/companies/rarr");
+  assert.equal(dynamicPortalContact.email, "info@eximpedia.app");
+  assert.equal(dynamicPortalContact.phone_number, "2091995945");
 
   const firstResultContact = normalizedFirstResult({
     company_name: "RARR Nuts Trading LLC",
@@ -325,18 +465,6 @@ async function main() {
   assert.equal(firstResultContact.source_url, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/");
   assert.equal(firstResultContact.email, "sales@volza.com");
   assert.equal(firstResultContact.phone_number, "+971 4 555 0123");
-  assert.equal(isRetryableGeminiJsonError("Gemini JSON response timed out"), true);
-  assert.equal(isRetryableGeminiJsonError("Gemini limit reached or rate limited"), false);
-  const emptyFallback = normalizedFirstResult(
-    fallbackGeminiResult(agentRow, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/", "Gemini JSON response timed out"),
-    agentRow,
-    "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/"
-  );
-  assert.equal(emptyFallback.company_name, "RARR Nuts Trading LLC");
-  assert.equal(emptyFallback.website_url, "https://www.volza.com/company-profile/rarr-nuts-trading-llc-12345/");
-  assert.equal(emptyFallback.email, "");
-  assert.equal(emptyFallback.phone_number, "");
-  assert.match(emptyFallback.notes, /Empty JSON fallback after Gemini retry/);
   assert.equal(hardwareParallelismCap(4096, 4), 2);
   assert.equal(hardwareParallelismCap(8192, 8), 3);
   assert.equal(adaptiveParallelismLimit({
@@ -369,6 +497,49 @@ async function main() {
     pageMemoryMb: 700,
     systemReserveMemoryMb: 1536
   }), 8);
+
+  const pipelineAgent = new ChatGptPlaywrightAgent();
+  const pipelineEvents = [];
+  pipelineAgent.launch = async () => ({ pages: () => [] });
+  pipelineAgent.ensureChatGPTLogin = async () => {
+    throw new Error("processRows should not require a separate login preflight");
+  };
+  pipelineAgent.batchSize = 25;
+  pipelineAgent.chatgptBatchParallelism = 4;
+  pipelineAgent.collectGoogleResultsBatch = async ({ items, batchIndex }) => {
+    throw new Error(`Local search collection should not run for direct ChatGPT batches: ${batchIndex}`);
+  };
+  pipelineAgent.processChatGPTBatch = async ({ items, batchIndex, output }) => {
+    pipelineEvents.push(`gpt-start-${batchIndex}`);
+    await new Promise((resolve) => setTimeout(resolve, batchIndex === 0 ? 60 : 5));
+    for (const item of items) {
+      for (const index of item.entry.indexes) {
+        output[index] = { ...output[index], websiteUrl: `https://example-${item.position}.com/` };
+      }
+    }
+    pipelineEvents.push(`gpt-end-${batchIndex}`);
+    return { company: items[items.length - 1]?.company || "", message: `batch ${batchIndex}` };
+  };
+  const pipelineRows = Array.from({ length: 100 }, (_, index) => ({
+    hsCode: "08011220",
+    websiteName: `Pipeline Company ${index}`,
+    companyName: `Pipeline Company ${index}`,
+    consignee: `Pipeline Company ${index}`,
+    consigneeUrl: `https://google.com/search?q=Pipeline%20Company%20${index}`,
+    country: "UNITED ARAB EMIRATES"
+  }));
+  const pipelineJobDir = path.join("/private/tmp", `chatgpt-pipeline-test-${process.pid}`);
+  fs.mkdirSync(pipelineJobDir, { recursive: true });
+  const pipelineOutput = await pipelineAgent.processRows(
+    pipelineRows,
+    pipelineJobDir,
+    () => {}
+  );
+  fs.rmSync(pipelineJobDir, { recursive: true, force: true });
+  assert.equal(pipelineOutput.length, 100);
+  assert.ok(pipelineEvents.indexOf("gpt-start-1") < pipelineEvents.indexOf("gpt-end-0"));
+  assert.ok(pipelineEvents.indexOf("gpt-start-2") < pipelineEvents.indexOf("gpt-end-0"));
+  assert.ok(pipelineEvents.indexOf("gpt-start-3") < pipelineEvents.indexOf("gpt-end-0"));
 
   processed.rows[0].websiteUrl = "https://rabelink.nl/";
   processed.rows[0].email = "info@rabelink.nl";

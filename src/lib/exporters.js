@@ -46,45 +46,6 @@
     return "";
   }
 
-  const NON_COMPANY_WEBSITE_HOSTS = [
-    "google.",
-    "bing.",
-    "duckduckgo.",
-    "linkedin.",
-    "facebook.",
-    "instagram.",
-    "youtube.",
-    "eximpedia.",
-    "tradeindata.",
-    "trademo.",
-    "trademe.",
-    "dnb.",
-    "zaubacorp.",
-    "tofler.",
-    "volza.",
-    "seair.",
-    "exportgenius.",
-    "importgenius.",
-    "indiamart.",
-    "tradeindia.",
-    "justdial.",
-    "yellowpages.",
-    "yelp.",
-    "kompass.",
-    "zoominfo.",
-    "rocketreach.",
-    "apollo."
-  ];
-
-  function isNonCompanyWebsiteHost(host) {
-    return NON_COMPANY_WEBSITE_HOSTS.some((part) => {
-      if (part.endsWith(".")) {
-        return host.includes(part);
-      }
-      return host === part || host.endsWith("." + part);
-    });
-  }
-
   function safeHyperlinkUrl(value, options = {}) {
     const url = normalizeExternalLink(value);
     if (!url) {
@@ -94,9 +55,6 @@
       const parsed = new URL(url);
       const host = parsed.hostname.toLowerCase();
       if (!["http:", "https:"].includes(parsed.protocol) || !host.includes(".") || host.includes("%") || host.includes(" ")) {
-        return "";
-      }
-      if (options.companyWebsite && isNonCompanyWebsiteHost(host)) {
         return "";
       }
       parsed.hash = "";

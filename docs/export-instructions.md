@@ -17,6 +17,6 @@
 - Email
 - Phone
 
-`Website Name` is the Consignee name shown by Power BI. Each unique company is processed with its extracted Google organic result links and a strict Gemini JSON prompt. Missing or unverified contacts remain blank.
+`Website Name` is the Consignee name shown by Power BI. Each unique company is processed with the captured hover query and a strict ChatGPT JSON prompt. Missing or unverified contacts remain blank.
 
 Excel Website URL cells are clickable. CSV contains plain URLs. Missing or unverified contacts remain blank.

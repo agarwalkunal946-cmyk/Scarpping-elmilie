@@ -14,6 +14,54 @@ const DEFAULT_SETTINGS = {
 
 const POLL_ALARM = "exim-playwright-job";
 const TERMINAL_JOB_STATUSES = ["completed", "partial", "failed"];
+const STORAGE_ROW_KEYS = [
+  "hsCode",
+  "websiteName",
+  "websiteUrl",
+  "email",
+  "phone",
+  "companyName",
+  "consignee",
+  "consigneeUrl",
+  "country",
+  "duplicateCount",
+  "contactSource",
+  "reviewStatus",
+  "sourceMethod",
+  "capturedAt"
+];
+
+function compactRowsForStorage(rows) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  return rows.map((row) => {
+    const compact = {};
+    for (const key of STORAGE_ROW_KEYS) {
+      if (row?.[key] !== undefined && row[key] !== null && row[key] !== "") {
+        compact[key] = row[key];
+      }
+    }
+    return compact;
+  });
+}
+
+async function safeStorageSet(values) {
+  try {
+    await chrome.storage.local.set(values);
+    return;
+  } catch (error) {
+    if (!/quota|storage/i.test(String(error?.message || error))) {
+      throw error;
+    }
+    const fallback = { ...values };
+    if (Array.isArray(fallback.latestRows)) {
+      fallback.latestRows = compactRowsForStorage(fallback.latestRows);
+    }
+    await chrome.storage.local.remove(["latestRawRows", "latestDiagnostics"]);
+    await chrome.storage.local.set(fallback);
+  }
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(["settings", "installedAt"]);
@@ -38,7 +86,7 @@ chrome.runtime.onInstalled.addListener(async () => {
       "latestAgentJob"
     ]);
   }
-  await chrome.storage.local.set({
+  await safeStorageSet({
     installedAt: existing.installedAt || new Date().toISOString(),
     settings: nextSettings
   });
@@ -67,7 +115,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     agentRequest("/health").then(sendResponse).catch((error) => sendResponse({ error: error.message }));
     return true;
   }
-  if (message?.type === "OPEN_GEMINI_LOGIN") {
+  if (message?.type === "OPEN_CHATGPT_LOGIN") {
     agentRequest("/auth/open", { method: "POST" }).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
     return true;
   }
@@ -117,10 +165,14 @@ async function startJob(rows) {
     method: "POST",
     body: JSON.stringify({ rows })
   });
-  await chrome.storage.local.set({ latestAgentJob: jobMetadata(job) });
+  await safeStorageSet({
+    latestAgentJob: jobMetadata(job),
+    latestRows: compactRowsForStorage(rows),
+    latestSchemaVersion: DEFAULT_SETTINGS.exportSchemaVersion
+  });
   await chrome.action.setBadgeBackgroundColor({ color: "#0b7fab" });
   await chrome.action.setBadgeText({ text: "AI" });
-  await chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+  await chrome.alarms.create(POLL_ALARM, { delayInMinutes: 0.1, periodInMinutes: 0.5 });
   return job;
 }
 
@@ -134,6 +186,7 @@ async function pollStoredJob() {
     if (["completed", "partial"].includes(current.status)) {
       await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
       await chrome.action.setBadgeText({ text: "OK" });
+      await chrome.alarms.clear(POLL_ALARM);
     }
     return current;
   }
@@ -146,10 +199,10 @@ async function pollStoredJob() {
   const metadata = jobMetadata(job);
   const storageUpdate = { latestAgentJob: metadata };
   if (Array.isArray(job.rows)) {
-    storageUpdate.latestRows = job.rows;
+    storageUpdate.latestRows = compactRowsForStorage(job.rows);
     storageUpdate.latestSchemaVersion = DEFAULT_SETTINGS.exportSchemaVersion;
   }
-  await chrome.storage.local.set(storageUpdate);
+  await safeStorageSet(storageUpdate);
   if (["completed", "partial"].includes(job.status)) {
     await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
     await chrome.action.setBadgeText({ text: "OK" });
@@ -162,10 +215,11 @@ async function pollStoredJob() {
     await chrome.action.setBadgeBackgroundColor({ color: "#0b7fab" });
     await chrome.action.setBadgeText({ text: ["waiting_login", "waiting_captcha"].includes(job.status) ? "IN" : "AI" });
   }
-  return metadata;
+  return Array.isArray(job.rows) ? { ...metadata, rows: job.rows } : metadata;
 }
 
 async function markStoredJobPartial(job, message) {
+  const stored = await chrome.storage.local.get(["latestRows"]);
   const partial = {
     ...job,
     status: "partial",
@@ -174,11 +228,16 @@ async function markStoredJobPartial(job, message) {
     message: `Playwright agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results. Showing saved data.`,
     stopReason: message
   };
-  await chrome.storage.local.set({ latestAgentJob: partial });
+  const storageUpdate = { latestAgentJob: partial };
+  if (Array.isArray(stored.latestRows)) {
+    storageUpdate.latestRows = stored.latestRows;
+    storageUpdate.latestSchemaVersion = DEFAULT_SETTINGS.exportSchemaVersion;
+  }
+  await safeStorageSet(storageUpdate);
   await chrome.action.setBadgeBackgroundColor({ color: "#16815d" });
   await chrome.action.setBadgeText({ text: "OK" });
   await chrome.alarms.clear(POLL_ALARM);
-  return partial;
+  return Array.isArray(stored.latestRows) ? { ...partial, rows: stored.latestRows } : partial;
 }
 
 function jobMetadata(job) {

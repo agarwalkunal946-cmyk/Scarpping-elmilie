@@ -6,7 +6,7 @@
 - Node.js 18 or newer.
 - Active EXIM Elite subscription.
 - Manual access to the filtered EXIM Elite / Power BI report.
-- A normal Gemini web account. No Gemini API key is required.
+- A normal ChatGPT web account. No ChatGPT API key is required.
 
 ## Install As Unpacked Extension
 
@@ -26,7 +26,7 @@ npm install
 npm run agent:login
 ```
 
-Sign in to Gemini in the Chrome window opened by Playwright. The login command detects the prompt box, saves the profile, closes Chrome, and exits automatically. Do not start `npm run agent` while `agent:login` is still running.
+Sign in to ChatGPT in the Chrome window opened by Playwright. The login command detects the prompt box, saves the profile, closes Chrome, and exits automatically. Do not start `npm run agent` while `agent:login` is still running.
 
 For normal use, start the companion agent and leave it running:
 
@@ -34,15 +34,15 @@ For normal use, start the companion agent and leave it running:
 npm run agent
 ```
 
-Normal agent processing is headless, so no Chrome window remains open. When Google requires CAPTCHA or Gemini requires login, current headless pages close and one visible Chrome window opens immediately instead of waiting for active rows. Complete the manual action; the window closes, interrupted rows retry, and headless processing resumes automatically.
+Normal agent processing runs in headless/background Chrome. The agent tries to select ChatGPT `High` mode before each batch. A visible Chrome window opens only when ChatGPT login requires manual action, then background processing resumes automatically.
 
 Stopping the agent preserves its latest row snapshot. The extension ends the loader, shows badge `OK`, and keeps those partial rows available for export. Restarting the agent does not silently leave an old job in a running state.
 
-The agent runs up to 15 workers in parallel by default. A worker keeps only one heavy Google/contact or Gemini page open at a time and closes it after each row. When free system memory drops below the safety reserve, new pages wait while running rows finish and release memory; all queued rows then continue automatically. Heavy images/media/fonts are skipped, disposable profile caches are cleared at launch without removing login cookies, Chrome's disk cache is capped, and old job artifacts are pruned. The same safeguards apply on macOS and Windows.
+The agent sends up to 25 unique companies per ChatGPT JSON-array batch. For each captured Power BI hover query, local Playwright sends the query directly to ChatGPT and asks it to find the first organic website URL, then return website/contact JSON. Up to 4 ChatGPT batch pages can run in parallel, so 100 unique rows can run as four 25-query batches at once. When free system memory drops below the safety reserve, new pages wait while running pages finish and release memory; all queued rows then continue automatically. Heavy images/media/fonts are skipped, disposable profile caches are cleared at launch without removing login cookies, Chrome's disk cache is capped, compact row snapshots avoid Chrome storage overload, and old job artifacts are pruned. The same safeguards apply on macOS and Windows.
 
-Optional `.env` controls are `GEMINI_HEADLESS=true|false` (default `true`), `GEMINI_PARALLELISM=1..15`, `GEMINI_MIN_FREE_MEMORY_MB` (default `2048`), `GEMINI_DISK_CACHE_MB=32..1024`, `GEMINI_BLOCK_HEAVY_RESOURCES=true|false`, `AGENT_ARTIFACT_RETENTION_DAYS`, and `AGENT_ARTIFACT_MAX_JOBS`.
+Optional `.env` controls are `CHATGPT_HEADLESS=true|false` (default `true`), `CHATGPT_BATCH_SIZE=1..50` (default `25`), `CHATGPT_BATCH_PARALLELISM=1..4` (default `4`), `CHATGPT_BATCH_TIMEOUT_MS` (default `600000`), `CHATGPT_PROMPT_REVIEW_MS` (default `0`), `CHATGPT_MIN_FREE_MEMORY_MB` (default `2048`), `CHATGPT_DISK_CACHE_MB=32..1024`, `CHATGPT_BLOCK_HEAVY_RESOURCES=true|false`, `AGENT_ARTIFACT_RETENTION_DAYS`, and `AGENT_ARTIFACT_MAX_JOBS`.
 
-The extension Settings page can open the Gemini login window only while the local agent is running.
+The extension Settings page can open the ChatGPT login window only while the local agent is running.
 
 ## Manual Login
 

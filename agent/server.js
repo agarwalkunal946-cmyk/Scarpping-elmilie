@@ -2,7 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { GeminiPlaywrightAgent, loadEnv } = require("./gemini-playwright");
+const { ChatGptPlaywrightAgent, loadEnv } = require("./chatgpt-playwright");
 
 loadEnv(path.resolve(process.cwd(), ".env"));
 
@@ -12,7 +12,7 @@ const jobsDir = path.join(dataDir, "jobs");
 const screenshotsDir = path.join(dataDir, "screenshots");
 const jobs = new Map();
 const queue = [];
-const agent = new GeminiPlaywrightAgent();
+const agent = new ChatGptPlaywrightAgent();
 let active = false;
 let currentJob = null;
 let shutdownStarted = false;
@@ -89,6 +89,18 @@ function persist(job) {
   fs.writeFileSync(path.join(jobsDir, `${job.id}.json`), JSON.stringify(job, null, 2));
 }
 
+function markJobPartial(job) {
+  if (!job || ["completed", "partial", "failed"].includes(job.status)) {
+    return;
+  }
+  job.status = "partial";
+  job.message = `Agent stopped after ${Number(job.processed || 0)}/${Number(job.total || 0)} results; saved rows are available.`;
+  job.error = "";
+  job.updatedAt = new Date().toISOString();
+  delete job.inputRows;
+  persist(job);
+}
+
 function publicJob(job) {
   return {
     id: job.id,
@@ -148,6 +160,9 @@ async function runQueue() {
   try {
     const inputRows = job.inputRows;
     const processing = agent.processRows(inputRows, jobScreenshots, (progress) => {
+      if (shutdownStarted) {
+        return;
+      }
       const manualKind = agent.manualIntervention?.kind;
       job.status = manualKind
         ? (manualKind === "captcha" ? "waiting_captcha" : "waiting_login")
@@ -171,16 +186,25 @@ async function runQueue() {
       persist(job);
     });
     delete job.inputRows;
-    job.rows = await processing;
-    job.status = "completed";
-    job.processed = job.total;
-    job.message = "All Gemini results completed";
+    const processedRows = await processing;
+    if (shutdownStarted) {
+      markJobPartial(job);
+    } else {
+      job.rows = processedRows;
+      job.status = "completed";
+      job.processed = job.total;
+      job.message = "All ChatGPT results completed";
+    }
   } catch (error) {
-    job.status = Number(job.processed || 0) > 0 ? "partial" : "failed";
-    job.error = job.status === "failed" ? (error?.message || String(error)) : "";
-    job.message = job.status === "partial"
-      ? `Agent stopped after ${job.processed}/${job.total} results; saved rows are available.`
-      : "Gemini Playwright job failed";
+    if (shutdownStarted) {
+      markJobPartial(job);
+    } else {
+      job.status = Number(job.processed || 0) > 0 ? "partial" : "failed";
+      job.error = job.status === "failed" ? (error?.message || String(error)) : "";
+      job.message = job.status === "partial"
+        ? `Agent stopped after ${job.processed}/${job.total} results; saved rows are available.`
+        : "ChatGPT Playwright job failed";
+    }
   }
   job.updatedAt = new Date().toISOString();
   delete job.inputRows;
@@ -217,7 +241,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/auth/open") {
       await agent.openLogin({ visible: true });
-      send(res, 200, { ok: true, message: "Gemini login window opened" });
+      send(res, 200, { ok: true, message: "ChatGPT login window opened" });
       return;
     }
     if (req.method === "POST" && url.pathname === "/jobs") {
@@ -272,14 +296,14 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Gemini Playwright agent listening on http://127.0.0.1:${port}`);
-  console.log("Run `npm run agent:login` once if Gemini is not already signed in.");
+  console.log(`ChatGPT Playwright agent listening on http://127.0.0.1:${port}`);
+  console.log("Run `npm run agent:login` once if ChatGPT is not already signed in.");
 });
 
 server.on("error", async (error) => {
   if (error?.code === "EADDRINUSE") {
     if (await checkExistingAgent()) {
-      console.log(`Gemini Playwright agent is already running at http://127.0.0.1:${port}`);
+      console.log(`ChatGPT Playwright agent is already running at http://127.0.0.1:${port}`);
       console.log("Use the existing agent window/process, or stop it before starting a fresh one.");
       process.exit(0);
     }
@@ -295,16 +319,18 @@ async function shutdown() {
     return;
   }
   shutdownStarted = true;
-  if (currentJob) {
-    currentJob.status = "partial";
-    currentJob.message = `Agent stopped after ${Number(currentJob.processed || 0)}/${Number(currentJob.total || 0)} results; saved rows are available.`;
-    currentJob.error = "";
-    currentJob.updatedAt = new Date().toISOString();
-    persist(currentJob);
+  markJobPartial(currentJob);
+  const forceExit = setTimeout(() => process.exit(0), 5000);
+  forceExit.unref();
+  try {
+    await agent.close();
+  } catch (error) {
+    // Shutdown is already in progress; persisted partial data matters more than close noise.
   }
-  await agent.close();
   server.close(() => process.exit(0));
 }
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("SIGHUP", shutdown);
+process.on("SIGQUIT", shutdown);

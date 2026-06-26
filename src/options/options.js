@@ -17,7 +17,7 @@ const fields = {
   scrollDelayMs: document.getElementById("scrollDelayMs"),
   playwrightEnabled: document.getElementById("playwrightEnabled"),
   agentBaseUrl: document.getElementById("agentBaseUrl"),
-  openGeminiLogin: document.getElementById("openGeminiLogin"),
+  openChatGPTLogin: document.getElementById("openChatGPTLogin"),
   dedupe: document.getElementById("dedupe"),
   startFromTop: document.getElementById("startFromTop"),
   restoreScroll: document.getElementById("restoreScroll"),
@@ -36,7 +36,7 @@ async function init() {
   });
   fields.form.addEventListener("submit", save);
   fields.reset.addEventListener("click", reset);
-  fields.openGeminiLogin.addEventListener("click", openGeminiLogin);
+  fields.openChatGPTLogin.addEventListener("click", openChatGPTLogin);
 }
 
 function renderSettings(settings) {
@@ -77,11 +77,11 @@ async function reset() {
   fields.status.textContent = "Reset";
 }
 
-async function openGeminiLogin() {
+async function openChatGPTLogin() {
   await chrome.storage.local.set({ settings: readSettings() });
   fields.status.textContent = "Opening...";
-  const response = await chrome.runtime.sendMessage({ type: "OPEN_GEMINI_LOGIN" });
-  fields.status.textContent = response?.error || "Gemini login opened";
+  const response = await chrome.runtime.sendMessage({ type: "OPEN_CHATGPT_LOGIN" });
+  fields.status.textContent = response?.error || "ChatGPT login opened";
 }
 
 function clamp(value, min, max) {
