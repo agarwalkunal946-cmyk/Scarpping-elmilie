@@ -6,7 +6,7 @@
 - Node.js 18 or newer.
 - Active EXIM Elite subscription.
 - Manual access to the filtered EXIM Elite / Power BI report.
-- A normal ChatGPT web account. No ChatGPT API key is required.
+- A normal Gemini web account. No Gemini API key is required.
 
 ## Install As Unpacked Extension
 
@@ -26,7 +26,7 @@ npm install
 npm run agent:login
 ```
 
-Sign in to ChatGPT in the Chrome window opened by Playwright. The login command detects the prompt box, saves the profile, closes Chrome, and exits automatically. Do not start `npm run agent` while `agent:login` is still running.
+Sign in to Gemini in the Chrome window opened by Playwright. The login command detects the prompt box, saves the profile, closes Chrome, and exits automatically. Do not start `npm run agent` while `agent:login` is still running.
 
 For normal use, start the companion agent and leave it running:
 
@@ -34,15 +34,15 @@ For normal use, start the companion agent and leave it running:
 npm run agent
 ```
 
-Normal agent processing follows `.env`. With `CHATGPT_HEADLESS=false` and `GOOGLE_HEADLESS=false`, ChatGPT and Google query Chrome windows stay visible/foreground. The agent tries to select ChatGPT `High` mode before each batch.
+Normal agent processing follows `.env`. With `GEMINI_HEADLESS=false` and `GOOGLE_HEADLESS=false`, Gemini and Google query Chrome windows stay visible/foreground.
 
 Stopping the agent preserves its latest row snapshot. The extension ends the loader, shows badge `OK`, and keeps those partial rows available for export. Restarting the agent does not silently leave an old job in a running state.
 
-The agent searches captured Power BI hover queries on Google in up to 6 visible tabs with a separate Google profile when `GOOGLE_HEADLESS=false`, waits for up to 3 organic website candidates, and sends each ready 25-result batch to ChatGPT for first-valid URL selection plus phone/email extraction while later Google searches continue. Up to 4 ChatGPT batch pages can run in parallel. When free system memory drops below the safety reserve, new pages wait while running pages finish and release memory; all queued rows then continue automatically. Heavy images/media/fonts are skipped in headless mode, disposable profile caches are cleared at launch without removing login cookies, Chrome's disk cache is capped, compact row snapshots avoid Chrome storage overload, and old job artifacts are pruned. The same safeguards apply on macOS and Windows.
+The agent searches captured Power BI hover queries on Google in up to 6 visible tabs with a separate Google profile when `GOOGLE_HEADLESS=false`, waits for up to 3 organic website candidates, and sends each ready 15-result batch to Gemini for first-valid URL selection plus deepsearch websearch scraping for phone/email while later Google searches continue. Up to 4 Gemini batch pages can run in parallel. When free system memory drops below the safety reserve, new pages wait while running pages finish and release memory; all queued rows then continue automatically. Heavy images/media/fonts are skipped in headless mode, disposable profile caches are cleared at launch without removing login cookies, Chrome's disk cache is capped, compact row snapshots avoid Chrome storage overload, and old job artifacts are pruned. The same safeguards apply on macOS and Windows.
 
-Optional `.env` controls are `CHATGPT_HEADLESS=true|false` (default `true`), `GOOGLE_HEADLESS=true|false` (defaults to `GEMINI_HEADLESS` when set, otherwise `CHATGPT_HEADLESS`), `GOOGLE_PROFILE_DIR`, `GOOGLE_SEARCH_PARALLELISM=1..12` (default `6`), `GOOGLE_SEARCH_TIMEOUT_MS` (default `90000`), `CHATGPT_BATCH_SIZE=1..50` (default `25`), `CHATGPT_BATCH_PARALLELISM=1..4` (default `4`), `CHATGPT_BATCH_TIMEOUT_MS` (default `600000`), `CHATGPT_PROMPT_REVIEW_MS` (default `0`), `CHATGPT_MIN_FREE_MEMORY_MB` (default `2048`), `CHATGPT_DISK_CACHE_MB=32..1024`, `CHATGPT_BLOCK_HEAVY_RESOURCES=true|false`, `AGENT_ARTIFACT_RETENTION_DAYS`, and `AGENT_ARTIFACT_MAX_JOBS`.
+Optional `.env` controls are `GEMINI_HEADLESS=true|false` (default `true`), `GOOGLE_HEADLESS=true|false` (defaults to `GEMINI_HEADLESS`), `GOOGLE_PROFILE_DIR`, `GOOGLE_SEARCH_PARALLELISM=1..12` (default `6`), `GOOGLE_SEARCH_TIMEOUT_MS` (default `90000`), `GEMINI_BATCH_SIZE=1..50` (default `15`), `GEMINI_BATCH_PARALLELISM=1..4` (default `4`), `GEMINI_BATCH_TIMEOUT_MS` (default `600000`), `GEMINI_PROMPT_REVIEW_MS` (default `0`), `GEMINI_MIN_FREE_MEMORY_MB` (default `2048`), `GEMINI_DISK_CACHE_MB=32..1024`, `GEMINI_BLOCK_HEAVY_RESOURCES=true|false`, `AGENT_ARTIFACT_RETENTION_DAYS`, and `AGENT_ARTIFACT_MAX_JOBS`.
 
-The extension Settings page can open the ChatGPT login window only while the local agent is running.
+The extension Settings page can open the Gemini login window only while the local agent is running.
 
 ## Manual Login
 

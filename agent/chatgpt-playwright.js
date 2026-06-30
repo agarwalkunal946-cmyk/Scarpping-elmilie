@@ -4,8 +4,9 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 const { chromium } = require("playwright-core");
 
-const AI_PROVIDER_NAME = "ChatGPT";
-const AI_PROVIDER_URL = "https://chatgpt.com/";
+const AI_PROVIDER_NAME = "Gemini";
+const AI_PROVIDER_URL = process.env.GEMINI_URL || "https://gemini.google.com/app";
+const AI_ARTIFACT_PREFIX = "gemini";
 
 function loadEnv(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -553,7 +554,8 @@ function batchResultPrompt(items) {
   })), null, 2);
 
   return [
-    "Choose the first valid website URL from Google candidates, then find phone and email for that selected website_url.",
+    "You are Gemini Flash-Lite. Work fast, but be strict and deterministic.",
+    "For each input, choose the first valid website URL from Google candidates, then find phone and email for that exact selected website_url.",
     "Return ONLY one valid JSON array. No markdown, no prose, no code fences, no extra text.",
     `The array must contain exactly ${items.length} objects, in the same order as the inputs.`,
     "Every object must use exactly these keys:",
@@ -563,16 +565,17 @@ function batchResultPrompt(items) {
     "- Copy batch_id exactly.",
     "- website_candidates are the top Google result URLs already collected by Chrome, in order.",
     "- Pick website_url from website_candidates: use the first URL that is a real website/page and not sponsored/ad, LinkedIn, Facebook, Instagram, YouTube, X/Twitter, TikTok, Pinterest, Google, gstatic, googleusercontent, or other social/video/search-engine URL.",
-    "- Do not Google-search for another URL. Do not use any URL outside website_candidates. Do not replace it with a nicer, official, cleaner, or related URL.",
+    "- Lock website_url after selection. Do not use any URL outside website_candidates as website_url. Do not replace it with a nicer, official, cleaner, or related URL.",
     "- If no valid website candidate exists, return empty strings for website_url, phone_number, and email.",
-    "- Before returning phone/email, fully scrape/crawl the selected website_url domain first. Do not stop at only the selected page.",
-    "- Check the full selected website/domain: selected page, homepage, header, footer, visible text, tables, FAQ, buttons, mailto/tel links, page source snippets, sitemap, and same-domain contact/about/location/branch/support/inquiry/privacy/terms pages.",
-    "- Follow same-domain navigation/footer/contact links that may contain phone/email. Finish this website/domain scrape before using deep-search.",
+    "- Phase 1, selected URL scraping: scrape/crawl the exact selected website_url first. Check the selected page, homepage, header, footer, visible text, tables, FAQ, buttons, mailto links, tel links, page snippets, sitemap, and same-domain contact/about/location/branch/support/inquiry/privacy/terms pages.",
+    "- Phase 2, selected URL websearch: if Phase 1 is missing phone/email, websearch the exact selected website_url and exact domain with contact, email, phone, telephone, mobile, WhatsApp, address, support, and about keywords. Use only results that clearly belong to the same selected website_url/domain/page/listing.",
+    "- Phase 3, deepsearch fallback: only if Phase 1 and Phase 2 do not find phone/email, deepsearch the exact domain, page title, company/listing name shown on the selected URL, and contact keywords. Keep website_url unchanged.",
+    "- Finish Phase 1 and Phase 2 for the selected website_url before Phase 3 deepsearch.",
     "- If website_url is a portal, directory, company profile, listing, marketplace, trade-data page, or generic website page, use any complete phone/email visible on that selected URL/domain, including footer/support/site-owner contact. It is valid because it belongs to website_url/domain.",
-    "- Only if phone/email is not found after full website_url/domain scraping, then deep-search/web-search exact website_url, domain, page title, and company/listing name with phone/email/contact.",
-    "- Use deep-search contact only when it clearly belongs to the same website_url/domain/company/listing. Keep website_url unchanged.",
+    "- Use deepsearch fallback contact only when it clearly belongs to the same website_url/domain/company/listing. Keep website_url unchanged.",
+    "- Verify ownership before output: the phone/email must appear on the selected URL/domain or in websearch/deepsearch evidence that names the same selected domain/company/listing.",
     "- Never use contact from an unrelated domain or unrelated company. Never guess.",
-    "- If phone or email is not found after website scraping plus deep/web search, use an empty string for that field.",
+    "- If phone or email is not found after selected URL scraping, selected URL websearch, and deepsearch fallback, use an empty string for that field.",
     "- Phone/email must be complete and readable. No hidden, partial, masked, protected, guessed, or placeholder values.",
     "- Use raw URLs only. Do not wrap URLs in markdown. Do not add extra keys.",
     "Input JSON:",
@@ -582,6 +585,11 @@ function batchResultPrompt(items) {
 
 async function findPromptBox(page) {
   const selectors = [
+    'rich-textarea .ql-editor[contenteditable="true"]',
+    '[aria-label="Enter a prompt for Gemini"]',
+    '[aria-label*="Gemini" i][contenteditable="true"]',
+    '[data-placeholder*="Ask Gemini" i][contenteditable="true"]',
+    '[data-test-id="textarea-inner"] [contenteditable="true"]',
     '[data-testid="prompt-textarea"]',
     '#prompt-textarea',
     '.ProseMirror[contenteditable="true"]',
@@ -593,7 +601,6 @@ async function findPromptBox(page) {
     '[role="textbox"][contenteditable="true"]',
     'textarea[placeholder*="Ask"]',
     'textarea[aria-label*="Ask" i]',
-    '[aria-label="Chat with ChatGPT"]',
     'textarea[aria-label*="prompt" i]',
     '[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"]'
@@ -607,14 +614,14 @@ async function findPromptBox(page) {
   return null;
 }
 
-async function isLikelyChatGptLoginPage(page) {
+async function isLikelyAiProviderLoginPage(page) {
   const url = page.url();
-  if (/auth\.openai\.com|\/auth\/login|\/login/i.test(url)) {
+  if (/accounts\.google\.com|\/signin|\/login|\/auth/i.test(url)) {
     return true;
   }
   const bodyText = await page.locator("body").innerText({ timeout: 2500 }).catch(() => "");
-  return /\b(log in|sign in|sign up|continue with google|continue with microsoft)\b/i.test(bodyText)
-    && !/\b(new chat|ask anything|message chatgpt)\b/i.test(bodyText);
+  return /\b(log in|sign in|sign up|choose an account|use your google account|continue with google)\b/i.test(bodyText)
+    && !/\b(new chat|ask gemini|enter a prompt for gemini|message gemini)\b/i.test(bodyText);
 }
 
 async function clickPromptBox(page, errorMessage) {
@@ -769,7 +776,7 @@ async function waitForAttachmentReady(page, beforeSignal, timeoutMs = 20000) {
     }
     await page.waitForTimeout(500);
   }
-  throw new Error("ChatGPT did not show a ready screenshot attachment");
+  throw new Error(`${AI_PROVIDER_NAME} did not show a ready screenshot attachment`);
 }
 
 async function promptRoot(box) {
@@ -841,7 +848,7 @@ async function setScreenshotOnExistingFileInput(page, screenshotPath, beforeSign
     await input.setInputFiles(screenshotPath);
     return waitForAttachmentReady(page, beforeSignal, 18000);
   }
-  throw new Error("No ChatGPT image file input was available");
+  throw new Error(`No ${AI_PROVIDER_NAME} image file input was available`);
 }
 
 async function openUploadMenu(page) {
@@ -863,7 +870,7 @@ async function openUploadMenu(page) {
       return null;
     }
   }
-  throw new Error("ChatGPT upload button was not found");
+  throw new Error(`${AI_PROVIDER_NAME} upload button was not found`);
 }
 
 async function uploadScreenshotFromMenu(page, screenshotPath, beforeSignal) {
@@ -898,7 +905,7 @@ async function uploadScreenshotFromMenu(page, screenshotPath, beforeSignal) {
 
 async function pasteScreenshot(page, screenshotPath, debugBasePath) {
   assertScreenshotReady(screenshotPath);
-  const box = await clickPromptBox(page, "ChatGPT prompt box not found before screenshot paste");
+  const box = await clickPromptBox(page, `${AI_PROVIDER_NAME} prompt box not found before screenshot paste`);
   const origin = new URL(page.url()).origin;
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin }).catch(() => {});
   const base64 = fs.readFileSync(screenshotPath).toString("base64");
@@ -961,7 +968,7 @@ async function pasteScreenshot(page, screenshotPath, debugBasePath) {
       await page.screenshot({ path: `${debugBasePath}-screenshot-attach-failed.png`, fullPage: true }).catch(() => {});
       fs.writeFileSync(`${debugBasePath}-screenshot-attach-failed.html`, await page.content().catch(() => ""));
     }
-    throw new Error(`ChatGPT screenshot attachment failed. ${attempts.join(" | ")}`);
+    throw new Error(`${AI_PROVIDER_NAME} screenshot attachment failed. ${attempts.join(" | ")}`);
   }
   return signal;
 }
@@ -970,7 +977,7 @@ async function fillPrompt(page, prompt) {
   let lastError = null;
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      const box = await clickPromptBox(page, "ChatGPT prompt box not found. Complete login in the Playwright Chrome window.");
+      const box = await clickPromptBox(page, `${AI_PROVIDER_NAME} prompt box not found. Complete login in the Playwright Chrome window.`);
       const tagName = await box.evaluate((element) => element.tagName);
       if (tagName === "TEXTAREA") {
         await box.fill(prompt, { timeout: 8000 });
@@ -988,13 +995,13 @@ async function fillPrompt(page, prompt) {
       if (cleanText(written).includes(cleanText(prompt).slice(-80))) {
         return;
       }
-      throw new Error("ChatGPT prompt text was not fully written");
+      throw new Error(`${AI_PROVIDER_NAME} prompt text was not fully written`);
     } catch (error) {
       lastError = error;
       await page.waitForTimeout(800);
     }
   }
-  throw new Error(`ChatGPT prompt fill failed: ${cleanText(lastError?.message || lastError)}`);
+  throw new Error(`${AI_PROVIDER_NAME} prompt fill failed: ${cleanText(lastError?.message || lastError)}`);
 }
 
 async function ensureScreenshotStillAttached(page, attachedSignal, debugBasePath) {
@@ -1006,7 +1013,7 @@ async function ensureScreenshotStillAttached(page, attachedSignal, debugBasePath
       await page.screenshot({ path: `${debugBasePath}-screenshot-missing-before-send.png`, fullPage: true }).catch(() => {});
       fs.writeFileSync(`${debugBasePath}-screenshot-missing-before-send.html`, await page.content().catch(() => ""));
     }
-    throw new Error("Screenshot attachment disappeared before ChatGPT send");
+    throw new Error(`Screenshot attachment disappeared before ${AI_PROVIDER_NAME} send`);
   }
 }
 
@@ -1048,7 +1055,7 @@ async function findSendButton(page, box) {
 }
 
 async function sendPrompt(page, prompt, debugBasePath, attachedSignal) {
-  const box = await clickPromptBox(page, "ChatGPT prompt box not found before send.");
+  const box = await clickPromptBox(page, `${AI_PROVIDER_NAME} prompt box not found before send.`);
   if (attachedSignal) {
     await ensureScreenshotStillAttached(page, attachedSignal, debugBasePath);
   }
@@ -1066,10 +1073,10 @@ async function sendPrompt(page, prompt, debugBasePath, attachedSignal) {
     : await box.innerText().catch(() => "");
   if (cleanText(remaining).includes(cleanText(prompt).slice(-80))) {
     if (debugBasePath) {
-      await page.screenshot({ path: `${debugBasePath}-chatgpt-send-failed.png`, fullPage: true }).catch(() => {});
-      fs.writeFileSync(`${debugBasePath}-chatgpt-send-failed.html`, await page.content().catch(() => ""));
+      await page.screenshot({ path: `${debugBasePath}-${AI_ARTIFACT_PREFIX}-send-failed.png`, fullPage: true }).catch(() => {});
+      fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-send-failed.html`, await page.content().catch(() => ""));
     }
-    throw new Error("ChatGPT prompt was filled, but the Send button was not activated");
+    throw new Error(`${AI_PROVIDER_NAME} prompt was filled, but the Send button was not activated`);
   }
 }
 
@@ -1089,8 +1096,8 @@ async function waitForChatGPTJson(page, timeoutMs, debugBasePath) {
     const blockingMessage = chatgptBlockingMessage(mainText);
     if (blockingMessage) {
       if (debugBasePath) {
-        await page.screenshot({ path: `${debugBasePath}-chatgpt-blocked.png`, fullPage: true }).catch(() => {});
-        fs.writeFileSync(`${debugBasePath}-chatgpt-blocked.txt`, mainText);
+        await page.screenshot({ path: `${debugBasePath}-${AI_ARTIFACT_PREFIX}-blocked.png`, fullPage: true }).catch(() => {});
+        fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-blocked.txt`, mainText);
       }
       throw new Error(blockingMessage);
     }
@@ -1113,9 +1120,9 @@ async function waitForChatGPTJson(page, timeoutMs, debugBasePath) {
     await page.waitForTimeout(350);
   }
   if (debugBasePath) {
-    fs.writeFileSync(`${debugBasePath}-chatgpt-timeout.txt`, lastText);
+    fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-timeout.txt`, lastText);
   }
-  throw new Error("ChatGPT JSON response timed out");
+  throw new Error(`${AI_PROVIDER_NAME} JSON response timed out`);
 }
 
 async function waitForChatGPTBatchJson(page, expectedCount, timeoutMs, debugBasePath, expectedIds = []) {
@@ -1134,8 +1141,8 @@ async function waitForChatGPTBatchJson(page, expectedCount, timeoutMs, debugBase
     const blockingMessage = chatgptBlockingMessage(mainText);
     if (blockingMessage) {
       if (debugBasePath) {
-        await page.screenshot({ path: `${debugBasePath}-chatgpt-blocked.png`, fullPage: true }).catch(() => {});
-        fs.writeFileSync(`${debugBasePath}-chatgpt-blocked.txt`, mainText);
+        await page.screenshot({ path: `${debugBasePath}-${AI_ARTIFACT_PREFIX}-blocked.png`, fullPage: true }).catch(() => {});
+        fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-blocked.txt`, mainText);
       }
       throw new Error(blockingMessage);
     }
@@ -1158,9 +1165,9 @@ async function waitForChatGPTBatchJson(page, expectedCount, timeoutMs, debugBase
     await page.waitForTimeout(350);
   }
   if (debugBasePath) {
-    fs.writeFileSync(`${debugBasePath}-chatgpt-batch-timeout.txt`, lastText);
+    fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-batch-timeout.txt`, lastText);
   }
-  throw new Error("ChatGPT batch JSON response timed out");
+  throw new Error(`${AI_PROVIDER_NAME} batch JSON response timed out`);
 }
 
 function chatgptBlockingMessage(value) {
@@ -1169,13 +1176,13 @@ function chatgptBlockingMessage(value) {
     return "";
   }
   if (/you(?:'| a)?ve reached (?:your )?(?:limit|usage limit)|rate limit|too many requests|quota exceeded|try again later/i.test(text)) {
-    return "ChatGPT limit reached or rate limited";
+    return `${AI_PROVIDER_NAME} limit reached or rate limited`;
   }
   if (/storage (?:is )?full|not enough storage|data (?:is )?full|browser data full/i.test(text)) {
-    return "ChatGPT browser storage/data is full";
+    return `${AI_PROVIDER_NAME} browser storage/data is full`;
   }
   if (/something went wrong|server error|couldn(?:'|\u2019)?t complete|response stopped|failed to generate/i.test(text)) {
-    return "ChatGPT showed a server/response error";
+    return `${AI_PROVIDER_NAME} showed a server/response error`;
   }
   return "";
 }
@@ -1196,106 +1203,30 @@ function booleanEnv(name, fallback) {
   return ["1", "true", "yes", "on"].includes(value);
 }
 
-function isChatGptUiUrl(value) {
+function numericProviderEnv(primaryName, legacyName, fallback, min, max) {
+  return numericEnv(primaryName, numericEnv(legacyName, fallback, min, max), min, max);
+}
+
+function booleanProviderEnv(primaryName, legacyName, fallback) {
+  return booleanEnv(primaryName, booleanEnv(legacyName, fallback));
+}
+
+function isAiProviderUiUrl(value) {
   try {
     const host = new URL(value).hostname.toLowerCase();
-    return host === "chatgpt.com"
-      || host.endsWith(".chatgpt.com")
-      || host === "openai.com"
-      || host.endsWith(".openai.com")
-      || host === "oaistatic.com"
-      || host.endsWith(".oaistatic.com")
-      || host === "oaiusercontent.com"
-      || host.endsWith(".oaiusercontent.com");
+    return host === "gemini.google.com"
+      || host.endsWith(".gemini.google.com")
+      || host === "gemini.gstatic.com"
+      || host.endsWith(".gemini.gstatic.com")
+      || host === "bard.google.com"
+      || host.endsWith(".bard.google.com")
+      || host === "accounts.google.com"
+      || host.endsWith(".accounts.google.com")
+      || host === "gstatic.com"
+      || host.endsWith(".gstatic.com");
   } catch (error) {
     return false;
   }
-}
-
-async function selectChatGptHighMode(page) {
-  const opened = await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const modeText = /^(auto|fast|standard|instant|medium|high)$/i;
-    const visible = (element) => {
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.visibility !== "hidden"
-        && style.display !== "none"
-        && rect.width > 8
-        && rect.height > 8;
-    };
-    const prompt = document.querySelector([
-      '[data-testid="prompt-textarea"]',
-      'textarea[placeholder*="Ask"]',
-      '[aria-label="Chat with ChatGPT"]',
-      '[contenteditable="true"]'
-    ].join(","));
-    let root = prompt?.closest("form") || prompt?.parentElement || document;
-    for (let depth = 0; depth < 5 && root?.parentElement; depth += 1) {
-      const buttons = Array.from(root.querySelectorAll("button,[role='button']"));
-      if (buttons.some((button) => visible(button) && modeText.test(clean(button.innerText || button.textContent)))) {
-        break;
-      }
-      root = root.parentElement;
-    }
-    const buttons = Array.from(root.querySelectorAll("button,[role='button']"))
-      .filter(visible)
-      .filter((button) => {
-        const text = clean(button.innerText || button.textContent);
-        const label = clean(button.getAttribute("aria-label") || button.getAttribute("title") || "");
-        const meta = `${text} ${label}`;
-        if (/send|microphone|voice|attach|file|image|plus|\+|tools/i.test(meta)) {
-          return false;
-        }
-        return modeText.test(text) || /\b(reason|reasoning|thinking|mode|effort|model)\b/i.test(label);
-      });
-    if (buttons.some((button) => /(^|\s)high(\s|$)/i.test(clean(button.innerText || button.textContent)))) {
-      return "already";
-    }
-    const control = buttons.find((button) => /^(auto|fast|standard|instant|medium)$/i.test(clean(button.innerText || button.textContent)))
-      || buttons.find((button) => /\b(reason|reasoning|thinking|mode|effort|model)\b/i.test(clean(button.getAttribute("aria-label") || button.getAttribute("title") || "")));
-    if (!control) {
-      return "";
-    }
-    control.click();
-    return "opened";
-  }).catch(() => "");
-
-  if (opened === "already") {
-    return "High";
-  }
-  if (!opened) {
-    return "";
-  }
-  await page.waitForTimeout(700);
-  const selected = await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const visible = (element) => {
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.visibility !== "hidden"
-        && style.display !== "none"
-        && rect.width > 8
-        && rect.height > 8;
-    };
-    const candidates = Array.from(document.querySelectorAll([
-      "button",
-      "[role='button']",
-      "[role='menuitem']",
-      "[role='option']"
-    ].join(",")));
-    const high = candidates.find((element) => visible(element) && /^high$/i.test(clean(element.innerText || element.textContent)));
-    if (!high) {
-      return false;
-    }
-    high.click();
-    return true;
-  }).catch(() => false);
-  if (selected) {
-    await page.waitForTimeout(500);
-    return "High";
-  }
-  return "";
 }
 
 function clearProfileCaches(profileDir) {
@@ -1586,7 +1517,7 @@ function applySkippedResult(output, entry, message) {
       websiteUrl: "",
       email: "",
       phone: "",
-      contactSource: `ChatGPT Playwright skipped: ${message}`
+      contactSource: `${AI_PROVIDER_NAME} Playwright skipped: ${message}`
     };
   }
 }
@@ -1611,7 +1542,7 @@ function applyChatGPTResult(output, entry, result, resultListPath) {
       email: result.email,
       phone: result.phone_number,
       contactSource: [
-        "ChatGPT Playwright",
+        `${AI_PROVIDER_NAME} Playwright`,
         result.source_url,
         resultListPath,
         result.notes
@@ -1631,7 +1562,7 @@ function batchFallbackResult(item, reason) {
     email: "",
     source_url: websiteUrl,
     confidence: 0,
-    notes: cleanText(reason || "No ChatGPT batch JSON result")
+    notes: cleanText(reason || `No ${AI_PROVIDER_NAME} batch JSON result`)
   };
 }
 
@@ -1668,29 +1599,29 @@ function applyBatchChatGPTResult(output, item, parsed, reason) {
   return result;
 }
 
-class ChatGptPlaywrightAgent {
+class GeminiPlaywrightAgent {
   constructor() {
     loadEnv(path.resolve(process.cwd(), ".env"));
-    this.profileDir = path.resolve(process.cwd(), process.env.CHATGPT_PROFILE_DIR || "agent-data/chatgpt-profile");
+    this.profileDir = path.resolve(process.cwd(), process.env.GEMINI_PROFILE_DIR || process.env.CHATGPT_PROFILE_DIR || "agent-data/gemini-profile");
     this.googleProfileDir = path.resolve(process.cwd(), process.env.GOOGLE_PROFILE_DIR || "agent-data/google-profile");
-    this.headless = booleanEnv("CHATGPT_HEADLESS", true);
+    this.headless = booleanProviderEnv("GEMINI_HEADLESS", "CHATGPT_HEADLESS", true);
     this.googleHeadless = booleanEnv("GOOGLE_HEADLESS", booleanEnv("GEMINI_HEADLESS", this.headless));
-    this.timeoutMs = Number(process.env.CHATGPT_TIMEOUT_MS || 30000);
-    this.batchTimeoutMs = numericEnv("CHATGPT_BATCH_TIMEOUT_MS", Math.max(this.timeoutMs, 600000), 15000, 900000);
-    this.batchSize = numericEnv("CHATGPT_BATCH_SIZE", 25, 1, 50);
-    this.chatgptBatchParallelism = numericEnv("CHATGPT_BATCH_PARALLELISM", 4, 1, 4);
+    this.timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || process.env.CHATGPT_TIMEOUT_MS || 30000);
+    this.batchTimeoutMs = numericProviderEnv("GEMINI_BATCH_TIMEOUT_MS", "CHATGPT_BATCH_TIMEOUT_MS", Math.max(this.timeoutMs, 600000), 15000, 900000);
+    this.batchSize = numericProviderEnv("GEMINI_BATCH_SIZE", "CHATGPT_BATCH_SIZE", 15, 1, 50);
+    this.chatgptBatchParallelism = numericProviderEnv("GEMINI_BATCH_PARALLELISM", "CHATGPT_BATCH_PARALLELISM", 4, 1, 4);
     this.googleSearchParallelism = numericEnv("GOOGLE_SEARCH_PARALLELISM", 6, 1, 12);
     this.googleSearchTimeoutMs = numericEnv("GOOGLE_SEARCH_TIMEOUT_MS", 90000, 10000, 300000);
-    this.promptReviewMs = numericEnv("CHATGPT_PROMPT_REVIEW_MS", 0, 0, 600000);
-    this.parallelism = numericEnv("CHATGPT_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
-    this.parallelismAuto = booleanEnv("CHATGPT_PARALLELISM_AUTO", true);
-    this.maxParallelism = numericEnv("CHATGPT_MAX_PARALLELISM", 10, 1, 30);
-    this.pageMemoryMb = numericEnv("CHATGPT_PAGE_MEMORY_MB", 700, 256, 4096);
-    this.systemReserveMemoryMb = numericEnv("CHATGPT_SYSTEM_RESERVE_MEMORY_MB", defaultSystemReserveMemoryMb(), 512, 32768);
-    this.diskCacheMb = numericEnv("CHATGPT_DISK_CACHE_MB", 128, 32, 1024);
-    this.blockHeavyResources = booleanEnv("CHATGPT_BLOCK_HEAVY_RESOURCES", true);
-    this.minFreeMemoryMb = numericEnv("CHATGPT_MIN_FREE_MEMORY_MB", 2048, 0, 32768);
-    this.workerStaggerMs = numericEnv("CHATGPT_WORKER_STAGGER_MS", 900, 0, 10000);
+    this.promptReviewMs = numericProviderEnv("GEMINI_PROMPT_REVIEW_MS", "CHATGPT_PROMPT_REVIEW_MS", 0, 0, 600000);
+    this.parallelism = numericProviderEnv("GEMINI_PARALLELISM", "CHATGPT_PARALLELISM", numericEnv("PLAYWRIGHT_AGENT_PARALLELISM", 15, 1, 30), 1, 30);
+    this.parallelismAuto = booleanProviderEnv("GEMINI_PARALLELISM_AUTO", "CHATGPT_PARALLELISM_AUTO", true);
+    this.maxParallelism = numericProviderEnv("GEMINI_MAX_PARALLELISM", "CHATGPT_MAX_PARALLELISM", 10, 1, 30);
+    this.pageMemoryMb = numericProviderEnv("GEMINI_PAGE_MEMORY_MB", "CHATGPT_PAGE_MEMORY_MB", 700, 256, 4096);
+    this.systemReserveMemoryMb = numericProviderEnv("GEMINI_SYSTEM_RESERVE_MEMORY_MB", "CHATGPT_SYSTEM_RESERVE_MEMORY_MB", defaultSystemReserveMemoryMb(), 512, 32768);
+    this.diskCacheMb = numericProviderEnv("GEMINI_DISK_CACHE_MB", "CHATGPT_DISK_CACHE_MB", 128, 32, 1024);
+    this.blockHeavyResources = booleanProviderEnv("GEMINI_BLOCK_HEAVY_RESOURCES", "CHATGPT_BLOCK_HEAVY_RESOURCES", true);
+    this.minFreeMemoryMb = numericProviderEnv("GEMINI_MIN_FREE_MEMORY_MB", "CHATGPT_MIN_FREE_MEMORY_MB", 2048, 0, 32768);
+    this.workerStaggerMs = numericProviderEnv("GEMINI_WORKER_STAGGER_MS", "CHATGPT_WORKER_STAGGER_MS", 900, 0, 10000);
     this.context = null;
     this.contextHeadless = null;
     this.launchPromise = null;
@@ -1745,11 +1676,11 @@ class ChatGptPlaywrightAgent {
           const resourceType = route.request().resourceType();
           const requestUrl = route.request().url();
           const isAuthChallenge = /accounts\.google\.com|recaptcha|\/challenge\//i.test(requestUrl);
-          const isChatGptUi = isChatGptUiUrl(requestUrl);
+          const isAiProviderUi = isAiProviderUiUrl(requestUrl);
           const blockedTypes = headless
             ? ["font", "image", "media", "texttrack", "stylesheet"]
             : ["font", "image", "media", "texttrack"];
-          if (!isAuthChallenge && !isChatGptUi && blockedTypes.includes(resourceType)) {
+          if (!isAuthChallenge && !isAiProviderUi && blockedTypes.includes(resourceType)) {
             await route.abort().catch(() => {});
             return;
           }
@@ -1766,7 +1697,7 @@ class ChatGptPlaywrightAgent {
       const message = cleanText(error?.message || error);
       if (/profile is already in use|opening in existing browser session/i.test(message)) {
         throw new Error(
-          "ChatGPT Playwright profile is already open. Stop the `npm run agent:login` terminal "
+          `${AI_PROVIDER_NAME} Playwright profile is already open. Stop the \`npm run agent:login\` terminal `
           + "or close its Playwright Chrome window, then restart `npm run agent`."
         );
       }
@@ -1857,10 +1788,10 @@ class ChatGptPlaywrightAgent {
       if (await findPromptBox(page)) {
         return page;
       }
-      onStatus?.("waiting_login", "Complete ChatGPT login in the Playwright Chrome window.");
+      onStatus?.("waiting_login", `Complete ${AI_PROVIDER_NAME} login in the Playwright Chrome window.`);
       await page.waitForTimeout(2000);
     }
-    throw new Error("ChatGPT login timed out");
+    throw new Error(`${AI_PROVIDER_NAME} login timed out`);
   }
 
   async waitForPrompt(page, timeoutMs = 15000) {
@@ -1932,7 +1863,7 @@ class ChatGptPlaywrightAgent {
         kind === "captcha" ? "waiting_captcha" : "waiting_login",
         kind === "captcha"
           ? "Opening Chrome now for CAPTCHA. Background processing will resume after it is solved."
-          : "Opening Chrome now for ChatGPT login. Background processing will resume after login."
+          : `Opening Chrome now for ${AI_PROVIDER_NAME} login. Background processing will resume after login.`
       );
       if (trackedPage) {
         await this.closeWorkerPage(page);
@@ -1949,7 +1880,7 @@ class ChatGptPlaywrightAgent {
       const status = kind === "captcha" ? "waiting_captcha" : "waiting_login";
       const message = kind === "captcha"
         ? "Solve the CAPTCHA in the opened Chrome window. Background processing will resume automatically."
-        : "Complete ChatGPT login in the opened Chrome window. Background processing will resume automatically.";
+        : `Complete ${AI_PROVIDER_NAME} login in the opened Chrome window. Background processing will resume automatically.`;
       const deadline = Date.now() + 15 * 60 * 1000;
       let solved = false;
       while (Date.now() < deadline) {
@@ -2053,10 +1984,10 @@ class ChatGptPlaywrightAgent {
       this.chatgptPage = null;
       return;
     }
-    if (!await isLikelyChatGptLoginPage(page)) {
+    if (!await isLikelyAiProviderLoginPage(page)) {
       await page.close().catch(() => {});
       this.chatgptPage = null;
-      throw new Error("ChatGPT is signed in but the prompt box did not become ready in background Chrome");
+      throw new Error(`${AI_PROVIDER_NAME} is signed in but the prompt box did not become ready in background Chrome`);
     }
     this.chatgptPage = null;
     await this.waitForManualIntervention({
@@ -2203,7 +2134,7 @@ class ChatGptPlaywrightAgent {
       processed: 0,
       total: entries.length,
       company: "",
-      message: `Starting Google top-3 search: ${googleParallelism} parallel tab(s); ChatGPT starts every ${batchSize} ready result set(s)`,
+      message: `Starting Google top-3 search: ${googleParallelism} parallel tab(s); ${AI_PROVIDER_NAME} starts every ${batchSize} ready result set(s)`,
       rows: output
     });
 
@@ -2322,7 +2253,7 @@ class ChatGptPlaywrightAgent {
   googleSearchItem(entry, position, jobDir) {
     const row = entry.row;
     const queryText = googleQueryText(row);
-    const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-chatgpt-input.json`);
+    const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-${AI_ARTIFACT_PREFIX}-input.json`);
     const googleResultPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-google-result.json`);
     const item = {
       batchId: batchId(position),
@@ -2472,7 +2403,7 @@ class ChatGptPlaywrightAgent {
     return batch.map(({ entry, position }) => {
       const row = entry.row;
       const queryText = googleQueryText(row);
-      const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-chatgpt-input.json`);
+      const resultListPath = path.join(jobDir, `${String(position + 1).padStart(5, "0")}-${AI_ARTIFACT_PREFIX}-input.json`);
       const item = {
         batchId: batchId(position),
         entry,
@@ -2509,7 +2440,7 @@ class ChatGptPlaywrightAgent {
     const firstPosition = items[0]?.position || 0;
     const debugBasePath = path.join(jobDir, `${String(firstPosition + 1).padStart(5, "0")}-batch-${batchIndex + 1}`);
     const prompt = batchResultPrompt(items);
-    fs.writeFileSync(`${debugBasePath}-chatgpt-prompt.txt`, prompt);
+    fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-prompt.txt`, prompt);
     const progress = (message, status = "running") => onProgress({
       status,
       processed: completedCount(),
@@ -2526,10 +2457,10 @@ class ChatGptPlaywrightAgent {
           });
           await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
           if (!await this.waitForPrompt(chatgptPage, 60000)) {
-            if (!await isLikelyChatGptLoginPage(chatgptPage)) {
+            if (!await isLikelyAiProviderLoginPage(chatgptPage)) {
               await chatgptPage.screenshot({ path: `${debugBasePath}-prompt-not-ready.png`, fullPage: true }).catch(() => {});
               fs.writeFileSync(`${debugBasePath}-prompt-not-ready.html`, await chatgptPage.content().catch(() => ""));
-              throw new Error("ChatGPT prompt was not ready in background Chrome; saved debug page without opening login window");
+              throw new Error(`${AI_PROVIDER_NAME} prompt was not ready in background Chrome; saved debug page without opening login window`);
             }
             const loginPage = chatgptPage;
             chatgptPage = null;
@@ -2551,21 +2482,17 @@ class ChatGptPlaywrightAgent {
             });
             await chatgptPage.goto(AI_PROVIDER_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
             if (!await this.waitForPrompt(chatgptPage, 60000)) {
-              throw new Error("ChatGPT prompt was not available after manual login");
+              throw new Error(`${AI_PROVIDER_NAME} prompt was not available after manual login`);
             }
-          }
-          const highMode = await selectChatGptHighMode(chatgptPage);
-          if (highMode) {
-            progress(`ChatGPT mode: ${highMode}`);
           }
           await fillPrompt(chatgptPage, prompt);
           if (!this.headless && this.promptReviewMs > 0) {
-            progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: visible prompt review`);
+            progress(`${AI_PROVIDER_NAME} batch ${batchIndex + 1}/${totalBatches}: visible prompt review`);
             await chatgptPage.waitForTimeout(this.promptReviewMs);
           }
-          progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: sending ${items.length} website URLs`);
+          progress(`${AI_PROVIDER_NAME} batch ${batchIndex + 1}/${totalBatches}: sending ${items.length} website URLs`);
           await sendPrompt(chatgptPage, prompt, debugBasePath);
-          progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: waiting for ${items.length} JSON objects`);
+          progress(`${AI_PROVIDER_NAME} batch ${batchIndex + 1}/${totalBatches}: waiting for ${items.length} JSON objects`);
           parsedResults = await waitForChatGPTBatchJson(
             chatgptPage,
             items.length,
@@ -2586,7 +2513,7 @@ class ChatGptPlaywrightAgent {
             } else {
               await delay(1200);
             }
-            progress(`ChatGPT batch ${batchIndex + 1}/${totalBatches}: retrying after browser reset`);
+            progress(`${AI_PROVIDER_NAME} batch ${batchIndex + 1}/${totalBatches}: retrying after browser reset`);
             continue;
           }
           break;
@@ -2601,10 +2528,10 @@ class ChatGptPlaywrightAgent {
         const parsed = byId.get(item.batchId) || null;
         const reason = item.error
           ? `Google website URL unavailable: ${item.error}`
-          : (errorMessage ? `ChatGPT batch issue: ${errorMessage}` : "");
+          : (errorMessage ? `${AI_PROVIDER_NAME} batch issue: ${errorMessage}` : "");
         applyBatchChatGPTResult(output, item, parsed, reason);
       });
-      fs.writeFileSync(`${debugBasePath}-chatgpt-batch-summary.json`, JSON.stringify({
+      fs.writeFileSync(`${debugBasePath}-${AI_ARTIFACT_PREFIX}-batch-summary.json`, JSON.stringify({
         batch: batchIndex + 1,
         totalBatches,
         requested: items.map((item) => item.batchId),
@@ -2613,8 +2540,8 @@ class ChatGptPlaywrightAgent {
       }, null, 2));
 
       const message = errorMessage
-        ? `ChatGPT batch ${batchIndex + 1}/${totalBatches}: saved fallback blanks for ${items.length}`
-        : `ChatGPT batch ${batchIndex + 1}/${totalBatches}: received ${parsedResults.length}/${items.length} JSON objects`;
+        ? `${AI_PROVIDER_NAME} batch ${batchIndex + 1}/${totalBatches}: saved fallback blanks for ${items.length}`
+        : `${AI_PROVIDER_NAME} batch ${batchIndex + 1}/${totalBatches}: received ${parsedResults.length}/${items.length} JSON objects`;
       onProgress({
         status: "running",
         processed: completedCount() + items.length,
@@ -2640,7 +2567,8 @@ class ChatGptPlaywrightAgent {
 }
 
 module.exports = {
-  ChatGptPlaywrightAgent,
+  GeminiPlaywrightAgent,
+  ChatGptPlaywrightAgent: GeminiPlaywrightAgent,
   loadEnv,
   parseJsonObject,
   parseJsonObjects,

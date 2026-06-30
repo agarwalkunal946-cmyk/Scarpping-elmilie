@@ -2,7 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { ChatGptPlaywrightAgent, loadEnv } = require("./chatgpt-playwright");
+const { GeminiPlaywrightAgent, loadEnv } = require("./chatgpt-playwright");
 
 loadEnv(path.resolve(process.cwd(), ".env"));
 
@@ -12,7 +12,7 @@ const jobsDir = path.join(dataDir, "jobs");
 const screenshotsDir = path.join(dataDir, "screenshots");
 const jobs = new Map();
 const queue = [];
-const agent = new ChatGptPlaywrightAgent();
+const agent = new GeminiPlaywrightAgent();
 let active = false;
 let currentJob = null;
 let shutdownStarted = false;
@@ -193,7 +193,7 @@ async function runQueue() {
       job.rows = processedRows;
       job.status = "completed";
       job.processed = job.total;
-      job.message = "All ChatGPT results completed";
+      job.message = "All Gemini results completed";
     }
   } catch (error) {
     if (shutdownStarted) {
@@ -203,7 +203,7 @@ async function runQueue() {
       job.error = job.status === "failed" ? (error?.message || String(error)) : "";
       job.message = job.status === "partial"
         ? `Agent stopped after ${job.processed}/${job.total} results; saved rows are available.`
-        : "ChatGPT Playwright job failed";
+        : "Gemini Playwright job failed";
     }
   }
   job.updatedAt = new Date().toISOString();
@@ -241,7 +241,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/auth/open") {
       await agent.openLogin({ visible: true });
-      send(res, 200, { ok: true, message: "ChatGPT login window opened" });
+      send(res, 200, { ok: true, message: "Gemini login window opened" });
       return;
     }
     if (req.method === "POST" && url.pathname === "/jobs") {
@@ -296,14 +296,14 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`ChatGPT Playwright agent listening on http://127.0.0.1:${port}`);
-  console.log("Run `npm run agent:login` once if ChatGPT is not already signed in.");
+  console.log(`Gemini Playwright agent listening on http://127.0.0.1:${port}`);
+  console.log("Run `npm run agent:login` once if Gemini is not already signed in.");
 });
 
 server.on("error", async (error) => {
   if (error?.code === "EADDRINUSE") {
     if (await checkExistingAgent()) {
-      console.log(`ChatGPT Playwright agent is already running at http://127.0.0.1:${port}`);
+      console.log(`Gemini Playwright agent is already running at http://127.0.0.1:${port}`);
       console.log("Use the existing agent window/process, or stop it before starting a fresh one.");
       process.exit(0);
     }

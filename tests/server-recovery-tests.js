@@ -38,7 +38,7 @@ child.stderr.on("data", (chunk) => { output += chunk.toString(); });
 async function waitForServer() {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    if (output.includes("ChatGPT Playwright agent listening")) {
+    if (output.includes("Gemini Playwright agent listening")) {
       return;
     }
     if (child.exitCode !== null) {

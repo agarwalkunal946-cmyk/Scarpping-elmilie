@@ -237,7 +237,7 @@ async function capture(mode) {
   setBusy(
     true,
     isFullCapture ? "Preparing capture" : "Reading report",
-    isFullCapture ? "Rows will be captured first, then the Playwright ChatGPT agent will fill contacts." : "Reading visible table rows."
+    isFullCapture ? "Rows will be captured first, then the Playwright Gemini agent will fill contacts." : "Reading visible table rows."
   );
   try {
     await updateSettingsFromForm();
@@ -325,7 +325,7 @@ async function capture(mode) {
     if (isFullCapture && state.rows.length) {
       const enriched = await enrichCurrentRows({
         startMessage: "Starting Playwright agent",
-        startDetail: "Google result links and ChatGPT JSON continue even if this popup closes."
+        startDetail: "Google result links and Gemini JSON continue even if this popup closes."
       });
       els.activity.textContent = enriched.ran
         ? enriched.message
@@ -758,7 +758,7 @@ async function enrichContacts() {
     return;
   }
 
-  setBusy(true, "Starting Playwright agent", "Google result links and ChatGPT JSON continue even if this popup closes.");
+  setBusy(true, "Starting Playwright agent", "Google result links and Gemini JSON continue even if this popup closes.");
   try {
     const enriched = await enrichCurrentRows({});
     els.activity.textContent = enriched.message;
@@ -782,7 +782,7 @@ async function enrichCurrentRows(options = {}) {
   setBusy(
     true,
     options.startMessage || "Starting Playwright agent",
-    options.startDetail || "Google result links and ChatGPT JSON continue even if this popup closes."
+    options.startDetail || "Google result links and Gemini JSON continue even if this popup closes."
   );
   const job = await chrome.runtime.sendMessage({
     type: "START_PLAYWRIGHT_JOB",
@@ -830,8 +830,8 @@ async function watchAgentJob(initialJob) {
       true,
       job.status === "waiting_captcha"
         ? "CAPTCHA solve required"
-        : (job.status === "waiting_login" ? "ChatGPT login required" : `Playwright working ${progress}`.trim()),
-      job.message || job.company || "Google result links and ChatGPT JSON processing."
+        : (job.status === "waiting_login" ? "Gemini login required" : `Playwright working ${progress}`.trim()),
+      job.message || job.company || "Google result links and Gemini JSON processing."
     );
     const nearDone = Number(job.total || 0) > 0 && Number(job.processed || 0) >= Number(job.total || 0) - 1;
     await sleep(nearDone ? 400 : 1500);
@@ -871,7 +871,7 @@ async function watchAgentJob(initialJob) {
     }
   }
   if (job?.status === "failed") {
-    throw new Error(job.error || job.message || "Playwright ChatGPT job failed");
+    throw new Error(job.error || job.message || "Playwright Gemini job failed");
   }
   if (["completed", "partial"].includes(job?.status) && Array.isArray(job.rows)) {
     await saveLatestRows(job.rows);

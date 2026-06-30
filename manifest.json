@@ -3,7 +3,7 @@
   "name": "EXIM Elite Report Exporter",
   "short_name": "EXIM Exporter",
   "version": "1.7.9",
-  "description": "Extracts EXIM Elite Power BI report data and enriches contacts through a local Playwright ChatGPT agent.",
+  "description": "Extracts EXIM Elite Power BI report data and enriches contacts through a local Playwright Gemini agent.",
   "permissions": [
     "activeTab",
     "alarms",

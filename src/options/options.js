@@ -81,7 +81,7 @@ async function openChatGPTLogin() {
   await chrome.storage.local.set({ settings: readSettings() });
   fields.status.textContent = "Opening...";
   const response = await chrome.runtime.sendMessage({ type: "OPEN_CHATGPT_LOGIN" });
-  fields.status.textContent = response?.error || "ChatGPT login opened";
+  fields.status.textContent = response?.error || "Gemini login opened";
 }
 
 function clamp(value, min, max) {
