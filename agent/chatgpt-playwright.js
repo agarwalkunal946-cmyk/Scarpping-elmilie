@@ -554,29 +554,32 @@ function batchResultPrompt(items) {
   })), null, 2);
 
   return [
-    "You are Gemini Flash-Lite. Work fast, but be strict and deterministic.",
-    "For each input, choose the first valid website URL from Google candidates, then find phone and email for that exact selected website_url.",
-    "Return ONLY one valid JSON array. No markdown, no prose, no code fences, no extra text.",
+    "You are Gemini Flash-Lite running a strict contact-finding workflow. Be fast, but research deeply and return only verified data.",
+    "For each input, choose the first valid website URL from Google candidates, lock that exact website_url, then find phone and email for that exact selected website_url using websearch, full scraping, and deepsearch fallback.",
+    "Return ONLY one valid JSON array. No markdown, no prose, no code fences, no explanations, no citations, no extra text.",
     `The array must contain exactly ${items.length} objects, in the same order as the inputs.`,
     "Every object must use exactly these keys:",
     '{"batch_id":"","website_url":"","phone_number":"","email":""}',
-    "Rules:",
-    "- Never refuse, apologize, explain limitations, or say you cannot browse. If a field cannot be verified, return an empty string for that field and still return JSON.",
+    "Selection rules:",
     "- Copy batch_id exactly.",
     "- website_candidates are the top Google result URLs already collected by Chrome, in order.",
-    "- Pick website_url from website_candidates: use the first URL that is a real website/page and not sponsored/ad, LinkedIn, Facebook, Instagram, YouTube, X/Twitter, TikTok, Pinterest, Google, gstatic, googleusercontent, or other social/video/search-engine URL.",
-    "- Lock website_url after selection. Do not use any URL outside website_candidates as website_url. Do not replace it with a nicer, official, cleaner, or related URL.",
+    "- Pick website_url from website_candidates: use the first URL that is a real website/page and not sponsored/ad, LinkedIn, Facebook, Instagram, YouTube, X/Twitter, TikTok, Pinterest, Google, gstatic, googleusercontent, or any other social/video/search-engine URL.",
+    "- Lock website_url immediately after selection. Never replace it with a cleaner, official, nicer, redirected, related, parent, or alternate URL. Never output any URL outside website_candidates as website_url.",
     "- If no valid website candidate exists, return empty strings for website_url, phone_number, and email.",
-    "- Phase 1, selected URL scraping: scrape/crawl the exact selected website_url first. Check the selected page, homepage, header, footer, visible text, tables, FAQ, buttons, mailto links, tel links, page snippets, sitemap, and same-domain contact/about/location/branch/support/inquiry/privacy/terms pages.",
-    "- Phase 2, selected URL websearch: if Phase 1 is missing phone/email, websearch the exact selected website_url and exact domain with contact, email, phone, telephone, mobile, WhatsApp, address, support, and about keywords. Use only results that clearly belong to the same selected website_url/domain/page/listing.",
-    "- Phase 3, deepsearch fallback: only if Phase 1 and Phase 2 do not find phone/email, deepsearch the exact domain, page title, company/listing name shown on the selected URL, and contact keywords. Keep website_url unchanged.",
-    "- Finish Phase 1 and Phase 2 for the selected website_url before Phase 3 deepsearch.",
-    "- If website_url is a portal, directory, company profile, listing, marketplace, trade-data page, or generic website page, use any complete phone/email visible on that selected URL/domain, including footer/support/site-owner contact. It is valid because it belongs to website_url/domain.",
-    "- Use deepsearch fallback contact only when it clearly belongs to the same website_url/domain/company/listing. Keep website_url unchanged.",
-    "- Verify ownership before output: the phone/email must appear on the selected URL/domain or in websearch/deepsearch evidence that names the same selected domain/company/listing.",
+    "Research order for each selected website_url:",
+    "- Phase 1, exact URL websearch: search the exact selected website_url, exact domain, and page title with contact, email, phone, telephone, mobile, WhatsApp, address, sales, support, enquiry, inquiry, about, location, branch, and footer keywords. Use only results that clearly refer to the same selected website_url/domain/page/listing.",
+    "- Phase 2, full scraping/crawling: fully scrape/crawl the exact selected website_url and same-domain pages. Check selected page, homepage, contact page, about page, locations/branches page, support page, enquiry/inquiry page, footer, header, visible text, tables, cards, buttons, PDFs/snippets if visible, mailto links, tel links, WhatsApp links, page source snippets, sitemap, robots-listed pages, and same-domain privacy/terms pages when contact details appear there.",
+    "- Phase 3, deepsearch fallback: only if Phase 1 and Phase 2 do not find phone/email, perform deepsearch using the exact domain, selected page title, company/listing name shown on the selected URL, address/location hints, and contact keywords. Keep website_url unchanged.",
+    "- Do not start Phase 3 until Phase 1 websearch and Phase 2 full scraping are exhausted for that selected website_url.",
+    "Validation rules:",
+    "- Use a phone/email only when it belongs to the locked website_url/domain/company/listing. The evidence must be on the selected domain or clearly name the same selected domain/company/listing.",
+    "- If website_url is a portal, directory, company profile, marketplace, trade-data page, listing, or generic page, use any complete phone/email visible on that selected URL/domain, including footer/support/site-owner contact. It is valid because it belongs to website_url/domain.",
+    "- Prefer complete business contact details from contact/about/footer/location pages. If several valid contacts exist, choose the most general business contact such as sales, info, support, enquiry, or main phone.",
     "- Never use contact from an unrelated domain or unrelated company. Never guess.",
-    "- If phone or email is not found after selected URL scraping, selected URL websearch, and deepsearch fallback, use an empty string for that field.",
+    "- If only phone is verified, return phone_number and leave email empty. If only email is verified, return email and leave phone_number empty.",
+    "- If phone or email is not found after exact URL websearch, full scraping/crawling, and deepsearch fallback, use an empty string for that field.",
     "- Phone/email must be complete and readable. No hidden, partial, masked, protected, guessed, or placeholder values.",
+    "- Never refuse, apologize, explain limitations, or say you cannot browse. If a field cannot be verified, return an empty string for that field and still return JSON.",
     "- Use raw URLs only. Do not wrap URLs in markdown. Do not add extra keys.",
     "Input JSON:",
     inputJson
@@ -2134,7 +2137,7 @@ class GeminiPlaywrightAgent {
       processed: 0,
       total: entries.length,
       company: "",
-      message: `Starting Google top-3 search: ${googleParallelism} parallel tab(s); ${AI_PROVIDER_NAME} starts every ${batchSize} ready result set(s)`,
+      message: `Starting Google top-3 search: ${googleParallelism} parallel tab(s); stopping after Website URL`,
       rows: output
     });
 
@@ -2198,9 +2201,8 @@ class GeminiPlaywrightAgent {
         onProgress
       }).then((result) => {
         googleCompleted += 1;
-        if (result.websiteCandidates?.length) {
-          pendingChatGptItems.push(result);
-        }
+        completed += 1;
+        // Website URL only: do not queue Gemini contact extraction after Google search.
         onProgress({
           status: "running",
           processed: completed,
@@ -2211,7 +2213,6 @@ class GeminiPlaywrightAgent {
             : `Google result ${googleCompleted}/${entries.length}: blank`,
           rows: output
         });
-        drainChatGptQueue(false);
       }).finally(() => {
         activeGoogleSearches.delete(task);
       });

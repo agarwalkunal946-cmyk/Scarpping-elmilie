@@ -563,19 +563,8 @@ async function main() {
     pipelineEvents.push(`google-end-${item.position}`);
     return item;
   };
-  pipelineAgent.processChatGPTBatch = async ({ items, batchIndex, output }) => {
-    pipelineEvents.push(`gpt-start-${batchIndex}`);
-    await new Promise((resolve) => setTimeout(resolve, batchIndex === 0 ? 60 : 5));
-    for (const item of items) {
-      assert.match(item.websiteUrl, /^https:\/\/google-result-\d+\.com\/$/);
-      assert.equal(item.websiteCandidates.length, 3);
-      assert.equal(item.websiteCandidates[0], item.websiteUrl);
-      for (const index of item.entry.indexes) {
-        output[index] = { ...output[index], websiteUrl: item.websiteUrl, phone: `phone-${item.position}` };
-      }
-    }
-    pipelineEvents.push(`gpt-end-${batchIndex}`);
-    return { company: items[items.length - 1]?.company || "", message: `batch ${batchIndex}` };
+  pipelineAgent.processChatGPTBatch = async () => {
+    throw new Error("Website URL only mode should not start Gemini contact extraction");
   };
   const pipelineRows = Array.from({ length: 100 }, (_, index) => ({
     hsCode: "08011220",
@@ -594,20 +583,16 @@ async function main() {
   );
   fs.rmSync(pipelineJobDir, { recursive: true, force: true });
   assert.equal(pipelineOutput.length, 100);
+  assert.equal(pipelineOutput[0].websiteUrl, "https://google-result-0.com/");
+  assert.ok(!pipelineOutput[0].phone);
   assert.equal(pipelineOutput[3].websiteUrl, "");
   assert.match(pipelineOutput[3].contactSource, /Google search skipped/);
   assert.equal(maxGoogleSearches, 6);
   assert.ok(pipelineEvents.indexOf("google-start-6") > pipelineEvents.indexOf("google-end-1"));
-  assert.ok(pipelineEvents.indexOf("gpt-start-0") < pipelineEvents.lastIndexOf("google-end-99"));
-  assert.ok(
-    pipelineEvents
-      .slice(0, pipelineEvents.indexOf("gpt-start-0"))
-      .filter((event) => event.startsWith("google-end-"))
-      .length >= 25
-  );
-  assert.ok(pipelineEvents.indexOf("gpt-start-1") < pipelineEvents.indexOf("gpt-end-0"));
-  assert.equal(pipelineProgress.find((event) => /^Google result/.test(event.message || ""))?.processed, 0);
-  assert.equal(pipelineProgress.find((event) => /Google result .*blank/.test(event.message || ""))?.processed, 0);
+  assert.equal(pipelineEvents.some((event) => event.startsWith("gpt-")), false);
+  assert.equal(pipelineProgress.find((event) => /^Google result/.test(event.message || ""))?.processed, 1);
+  assert.ok(pipelineProgress.find((event) => /Google result .*blank/.test(event.message || ""))?.processed > 0);
+  assert.equal(pipelineProgress[pipelineProgress.length - 1]?.processed, 100);
 
   const originalLaunchPersistentContext = testChromium.launchPersistentContext;
   try {
